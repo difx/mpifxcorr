@@ -16,15 +16,6 @@
  *   Free Software Foundation, Inc.,                                       *
  *   59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.             *
  ***************************************************************************/
-//===============================================================================
-// SVN properties (DO NOT CHANGE)
-//
-// $HeadURL$
-// $LastChangedRevision$
-// $Author$
-// $LastChangedDate$
-//
-//===============================================================================
 
 /** \file architecture.h
  *  \brief File contains mapping for vector functions to specific architectures
@@ -45,7 +36,6 @@
 #define CR_PROCESSCONTROL 4
 #define DS_TERMINATE      5
 #define DS_PROCESS        6
-#define MKV_CONTROL       7
 
 //define the architecture to be compiled for here
 #define ARCH INTEL

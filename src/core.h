@@ -9,17 +9,6 @@
  *   but WITHOUT ANY WARRANTY; without even the implied warranty of        *
  *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.                  *
  ***************************************************************************/
-
-//===============================================================================
-// SVN properties (DO NOT CHANGE)
-//
-// $HeadURL$
-// $LastChangedRevision$
-// $Author$
-// $LastChangedDate$
-//
-//===============================================================================
-
 #ifndef CORE_H
 #define CORE_H
 
@@ -62,7 +51,7 @@ public:
 protected:
  /** 
   * Launches a new processing thread, which will work on a portion of the time slice every time an element in the circular buffer is processed
-  * @param tdata Pointer to a processthreadinfo strcucture, describing which number thread this will be for this Core
+  * @param tdata Pointer to a processthreadinfo structure, describing which number thread this will be for this Core
   */
   static void * launchNewProcessThread(void * tdata);
 
@@ -101,12 +90,6 @@ private:
   * @param oldconfigindex The index of the config which was previously being used
   */
   void createPulsarAccumSpace(cf32***** pulsaraccumspace, int newconfigindex, int oldconfigindex);
-
-// /**
-//  * Amplitude calibrates the baseline visibilities when pulsar binning without scrunching, based on how many accumulations were performed for each bin
-//  * @param index The index in the circular send/receive buffer to be scaled
-//  */
-//  void pulsarScale(int index);
 
  /**
   * While the correlation is continuing, processes the given thread's share of the next element in the send/receive circular buffer
@@ -158,7 +141,6 @@ private:
   MPI_Status * msgstatuses;
   int mpiid, numdatastreams, numbaselines, databytes, controllength, numreceived, currentconfigindex, numprocessthreads, maxresultlength, startmjd, startseconds;
   int * datastreamids;
-  //f32 * pulsarscale;
   processslot * procslots;
   pthread_t * processthreads;
   pthread_cond_t * processconds;

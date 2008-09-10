@@ -9,17 +9,6 @@
  *   but WITHOUT ANY WARRANTY; without even the implied warranty of        *
  *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.                  *
  ***************************************************************************/
-
-//===============================================================================
-// SVN properties (DO NOT CHANGE)
-//
-// $HeadURL$
-// $LastChangedRevision$
-// $Author$
-// $LastChangedDate$
-//
-//===============================================================================
-
 #ifndef DATASTREAM_H
 #define DATASTREAM_H
 
@@ -63,7 +52,7 @@ public:
  /**
   * Creates all arrays, initialises the reading thread and loads delays from the precomputed delay file
   */
-  void initialise();
+  virtual void initialise();
 
  /**
   * While the correlation continues, keep accepting control information from the FxManager and sending data to the appropriate
@@ -144,7 +133,6 @@ protected:
   string ** datafilenames;
   ifstream input;
   
-private:
   static const int LBA_HEADER_LENGTH = 4096;
  
  /** 
@@ -152,13 +140,13 @@ private:
   * @param configindex The config index at the current time
   * @param fileindex The number of the file to be opened
   */
-  void openfile(int configindex, int fileindex);
+  virtual void openfile(int configindex, int fileindex);
 
  /** 
   * Attempts to open the next frame by reading data from the open network socket
   * @return 0 on failure, otherwise the framesize in bytes
   */
-  int openframe();
+  virtual int openframe();
 
  /** 
   * Attempts to open a network socket to read data from
@@ -175,7 +163,7 @@ private:
  /** 
   * While the correlation continues and there are more files to be read, continues reading data into the databuffer as fast as possible
   */
-  void loopfileread();
+  virtual void loopfileread();
 
  /** 
   * While the correlation continues and the network socket remains open, continues reading data into the databuffer as fast as possible
@@ -193,7 +181,7 @@ private:
   * @param buffersegment The segment of the databuffer that this read will be stored in
   * @param framebytesremaining The number of bytes left in this frame before reading a new frame is necessary
   */
-  void networkToMemory(int buffersegment, int & framebytesremaining);
+  virtual void networkToMemory(int buffersegment, int & framebytesremaining);
 
  /** 
   * Reads the specified number of bytes from the specified socket into the provided buffer
@@ -202,7 +190,7 @@ private:
   * @param bytestoread The number of bytes to read from the socket
   * @param nread The number of bytes actually read
   */
-  int readnetwork(int sock, char* ptr, int bytestoread, int* nread);
+  virtual int readnetwork(int sock, char* ptr, int bytestoread, int* nread);
 
  /** 
   * Loads the precomputed delays for this telescope from the specified delay file
@@ -249,7 +237,7 @@ private:
   int * filesread;
   int * confignumfiles;
   double a, b, c, clockoffset, clockrate;
-  bool readthreadstarted, keepreading, readfromfile;
+  bool readthreadstarted, keepreading, readfromfile, tcp;
   double ** delays;
   int * scanstarts;
   int * scanlengths;

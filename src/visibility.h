@@ -9,20 +9,10 @@
  *   but WITHOUT ANY WARRANTY; without even the implied warranty of        *
  *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.                  *
  ***************************************************************************/
-
-//===============================================================================
-// SVN properties (DO NOT CHANGE)
-//
-// $HeadURL$
-// $LastChangedRevision$
-// $Author$
-// $LastChangedDate$
-//
-//===============================================================================
-
 #ifndef VISIBILITY_H
 #define VISIBILITY_H
 
+#include <mpi.h>
 #include <string>
 #include "architecture.h"
 #include "datastream.h"
@@ -45,22 +35,23 @@ public:
   * @param numvis The number of Visibilities in the array
   * @param eseconds The length of the correlation, in seconds
   * @param skipseconds The number of seconds to skip from the start of the correlation, due to the first source(s) not being correlated
+  * @param startns The number of nanoseconds to skip from the start of the correlation
   * @param pnames The names of the polarisation products eg {RR, LL, RL, LR} or {XX, YY, XY, YX}
   * @param mon Whether to send visibility data down a monitor socket
   * @param port The port number to send down
   * @param hname The socket to send monitor data down
   * @param monskip Only send 1 in every monskip visibilities to the monitor
   */
-  Visibility(Configuration * conf, int id, int numvis, int eseconds, int skipseconds, const string * pnames, bool mon, int port, char * hname, int * sock, int monskip);
+  Visibility(Configuration * conf, int id, int numvis, int eseconds, int skipseconds, int startns, const string * pnames, bool mon, int port, char * hname, int * sock, int monskip);
 
   ~Visibility();
 
  /**
   * Adds one sub-integration to the accumulator
-  * @param blockresult The sub-integration to be added
+  * @param subintresults The sub-integration to be added
   * @return Whether this integration period is now complete
   */
-  bool addData(cf32* blockresult);
+  bool addData(cf32* subintresults);
 
  /**
   * Writes this Visibility's integrated results to disk, after amplitude calibration
@@ -84,12 +75,17 @@ public:
   * @return Difference between specified time and centre of current integration period, in seconds
   */
   inline double timeDifference(int seconds, int ns)
-    { return double(seconds-currentstartseconds) + double(ns)/1000000000.0 - double(currentstartsamples - blocksamples/2)/samplespersecond; }
+    { return double(seconds-currentstartseconds) + double(ns)/1000000000.0 - double(currentstartsamples - subintsamples/2)/samplespersecond; }
 
  /**
   * @return The time at the start of the current integration period
   */
   inline double getTime() { return double(currentstartseconds) + double(currentstartsamples)/double(samplespersecond); }
+
+/**
+  * Send a difxmessage containing integration time and antenna weights
+  */
+  void multicastweights();
 
 private:
  /**
@@ -141,19 +137,24 @@ private:
 /**
   * Writes the ascii header for a visibility point in a DiFX format output file
   */
-  void writeDiFXHeader(ofstream * output, int baselinenum, int dumpmjd, double dumpseconds, int configindex, int sourceindex, int freqindex, const char polproduct[3], int pulsarbin, int flag, int writeweights, float buvw[3]);
+  void writeDiFXHeader(ofstream * output, int baselinenum, int dumpmjd, double dumpseconds, int configindex, int sourceindex, int freqindex, const char polproduct[3], int pulsarbin, int flag, float weight, float buvw[3]);
 
-  int visID, expermjd, experseconds, integrationsamples, currentstartseconds, currentstartsamples, offset, offsetperintegration, blocksthisintegration, blocksamples, numvisibilities, numdatastreams, numbaselines, numchannels, currentblocks, resultlength, currentconfigindex, samplespersecond, maxproducts, executeseconds, autocorrincrement;
+  int visID, expermjd, experseconds, integrationsamples, currentstartseconds, currentstartsamples, offset, offsetperintegration, subintsthisintegration, subintsamples, numvisibilities, numdatastreams, numbaselines, numchannels, currentsubints, resultlength, currentconfigindex, samplespersecond, maxproducts, executeseconds, autocorrincrement;
+  double fftsperintegration, meansubintsperintegration;
   bool first, monitor, pulsarbinon;
   int * mon_socket;
   int monitor_skip;
   int portnum;
   char * hostname;
   cf32 ** autocorrcalibs;
+  f32 ** autocorrweights;
+  f32 *** baselineweights;
   std::string * telescopenames;
   //cf32 *** results;
   cf32 * results;
+#ifdef HAVE_RPFITS
   cf32 * rpfitsarray;
+#endif
   Configuration * config;
   const string * polnames;
   f32 *** binweightsums;

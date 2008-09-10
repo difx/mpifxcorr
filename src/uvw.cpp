@@ -9,16 +9,6 @@
  *   but WITHOUT ANY WARRANTY; without even the implied warranty of        *
  *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.                  *
  ***************************************************************************/
-//===============================================================================
-// SVN properties (DO NOT CHANGE)
-//
-// $HeadURL$
-// $LastChangedRevision$
-// $Author$
-// $LastChangedDate$
-//
-//===============================================================================
-
 #include "uvw.h"
 #include "configuration.h"
 
@@ -251,12 +241,13 @@ void Uvw::getSourceName(int mjd, int sec, string & toset)
   int index = int(((mjd-expermjd)*86400 + sec-experstartseconds)/uvwincrementsecs);
   if(index < 0)
   {
-    cerr << "Error - attempting to get a source name from mjd " << mjd << "." << double(sec)/86400.0 << ", when the uvw file begins at " << expermjd << "." << double(experstartseconds)/86400.0 << ", will take first source" << endl;
+    //NOTE -- the following error is commented out since this case seems to happen fairly frequently
+    //cerr << "Error - attempting to get a source name from mjd " << mjd << "." << double(sec)/86400.0 << ", when the uvw file begins at " << expermjd << "." << double(experstartseconds)/86400.0 << ", will take first source" << endl;
     index = 0;
   }
   else if (index >= numuvwpoints)
   {
-    cerr << "Error - attempting to get a source name from mjd " << mjd << "." << double(sec)/86400.0 << ", when the uvw file ends at " << expermjd << "." << double(experstartseconds + numuvwpoints*uvwincrementsecs)/86400.0 << ", will take last source" << endl;
+    //cerr << "Error - attempting to get a source name from mjd " << mjd << "." << double(sec)/86400.0 << ", when the uvw file ends at " << expermjd << "." << double(experstartseconds + numuvwpoints*uvwincrementsecs)/86400.0 << ", will take last source" << endl;
     index = numuvwpoints-1;
   }
   toset = scansources[scanindices[scannumbers.at(index)]].name;
@@ -265,7 +256,7 @@ void Uvw::getSourceName(int mjd, int sec, string & toset)
 //utility routine which returns an integer which FITS expects based on the type of mount
 int Uvw::getMountInt(string mount)
 {
-  if(mount.compare("azel") == 0) //its an azel mount
+  if(mount.compare("azel") == 0 || mount.compare("altz") == 0) //its an azel mount
     return 0;
     
   if(mount.compare("equa") == 0 || mount.compare("hadec") == 0) //equatorial mount

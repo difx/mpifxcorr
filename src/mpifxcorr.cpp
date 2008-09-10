@@ -10,17 +10,6 @@
  *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.                  *
  ***************************************************************************/
 
-//===============================================================================
-// SVN properties (DO NOT CHANGE)
-//
-// $HeadURL$
-// $LastChangedRevision$
-// $Author$
-// $LastChangedDate$
-//
-//===============================================================================
-
-
 #ifdef HAVE_CONFIG_H
 #include <config.h>
 #endif
@@ -33,12 +22,17 @@
 #include "core.h"
 #include "datastream.h"
 #include "mk5.h"
+#include "nativemk5.h"
+#include "mpifxcorr.h"
 #include <sys/utsname.h>
 //includes for socket stuff - for monitoring
 #include <sys/socket.h>
 #include <netdb.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#ifdef HAVE_DIFXMESSAGE
+#include <difxmessage.h>
+#endif
 
 //setup monitoring socket
 int setup_net(char *monhostname, int port, int window_size, int *sock) {
@@ -102,18 +96,48 @@ int setup_net(char *monhostname, int port, int window_size, int *sock) {
   return(0);
 } /* Setup Net */
 
+static void generateIdentifier(const char *inputfile, int myID, int numdatastreams, char *identifier)
+{
+  int i, l, s=0;
+
+  for(i = 0; inputfile[i]; i++)
+  {
+    if(inputfile[i] == '/')
+    {
+      s = i+1;
+    }
+  }
+
+  if(inputfile[s] == 0)
+  {
+    s = 0;
+  }
+
+  strcpy(identifier, inputfile+s);
+  l = strlen(identifier);
+  
+  // strip off ".input"
+  for(i = l-1; i > 0; i--)
+  {
+    if(identifier[i] == '.')
+    {
+      identifier[i] = 0;
+      break;
+    }
+  }
+}
+
+
 //main method - run by everyone
 int main(int argc, char *argv[])
 {
   MPI_Comm world, return_comm;
-  MPI_Status status;
   int numprocs, myID, numdatastreams, numcores;
-  int mkvcontrol[2];
   double t1, t2;
   Configuration * config;
-  FxManager * manager;
-  Core * core;
-  DataStream * stream;
+  FxManager * manager = 0;
+  Core * core = 0;
+  DataStream * stream = 0;
   int * coreids;
   int * datastreamids;
   bool monitor = false;
@@ -121,8 +145,8 @@ int main(int argc, char *argv[])
   int nameslength = 1;
   char * monhostname = new char[nameslength];
   char * mpihost = new char[nameslength];
-  int port, monitor_skip;
-
+  int port, monitor_skip, namelen;
+  char processor_name[MPI_MAX_PROCESSOR_NAME];
 
   cout << "About to run MPIInit" << endl;
 
@@ -131,54 +155,61 @@ int main(int argc, char *argv[])
   MPI_Comm_size(world, &numprocs);
   MPI_Comm_rank(world, &myID);
   MPI_Comm_dup(world, &return_comm);
-  struct utsname ugnm;
-  if (uname(&ugnm) >=0)
-    strncpy(mpihost, ugnm.nodename, nameslength);
-  mpihost[nameslength-1] = '\0';
-  cout << "MPI Process " << myID << " is running on host " << mpihost << endl;
+  MPI_Get_processor_name(processor_name, &namelen);
+
+  cout << "MPI Process " << myID << " is running on host " << processor_name << endl;
   
   if(argc == 3)
   {
     if(!(argv[2][0]=='-' && argv[2][1]=='M'))
     {
       std::cerr << "Error - invoke with mpifxcorr <inputfilename> [-M<monhostname>:port[:monitor_skip]]" << endl;
+      MPI_Barrier(world);
+      MPI_Finalize();
       return EXIT_FAILURE;
     }
     monitor = true;
     monitoropt = string(argv[2]);
     int colindex1 = monitoropt.find_first_of(':');
     int colindex2 = monitoropt.find_last_of(':');
-    if(colindex2 == string::npos)
+    if(colindex2 == string::npos) 
+      // BUG: This does not work and skip ends up equaling port!!!!
     {
       port = atoi(monitoropt.substr(colindex1 + 1).c_str());
-      monitor_skip == 1;
+      monitor_skip = 1;	
     }
     else
     {
       port = atoi(monitoropt.substr(colindex1 + 1, colindex2-colindex1-1).c_str());
       monitor_skip = atoi(monitoropt.substr(colindex2 + 1).c_str());
+
     }
     strcpy(monhostname, monitoropt.substr(2,colindex1-2).c_str());
   }
   else if(argc != 2)
   {
     std::cerr << "Error - invoke with mpifxcorr <inputfilename> [-M<monhostname>:port[:monitor_skip]]" << endl;
+    MPI_Barrier(world);
+    MPI_Finalize();
     return EXIT_FAILURE;
   }
 
   cout << "About to process the input file.." << endl;
   //process the input file to get all the info we need
   config = new Configuration(argv[1]);
-  numdatastreams = config->getNumDataStreams();
-  if(myID >= FxManager::FIRSTTELESCOPEID && myID < FxManager::FIRSTTELESCOPEID + numdatastreams) //I'm a datastream
+  if(!config->consistencyOK())
   {
-    if(config->isMkV(myID-1))
-      config->findMkVFormat(0, myID-1);
+    //There was a problem with the input file, so shut down gracefully
+    cerr << "Config encountered inconsistent setup in config file - aborting correlation" << endl;
+    MPI_Barrier(world);
+    MPI_Finalize();
+    return EXIT_FAILURE;
   }
-  numcores = numprocs - (FxManager::FIRSTTELESCOPEID + numdatastreams);
+  numdatastreams = config->getNumDataStreams();
+  numcores = numprocs - (fxcorr::FIRSTTELESCOPEID + numdatastreams);
   if(numcores < 1)
   {
-    cerr << "Error - must be invoked with at least " << FxManager::FIRSTTELESCOPEID + numdatastreams + 1 << " processors (was invoked with " << numprocs << " processors) - aborting!!!" << endl;
+    cerr << "Error - must be invoked with at least " << fxcorr::FIRSTTELESCOPEID + numdatastreams + 1 << " processors (was invoked with " << numprocs << " processors) - aborting!!!" << endl;
     return EXIT_FAILURE;
   }
 
@@ -186,18 +217,26 @@ int main(int argc, char *argv[])
   coreids = new int[numcores];
   datastreamids = new int[numdatastreams];
   for(int i=0;i<numcores;i++)
-    coreids[i] = FxManager::FIRSTTELESCOPEID + numdatastreams + i;
+    coreids[i] = fxcorr::FIRSTTELESCOPEID + numdatastreams + i;
 
   for(int i=0;i<numdatastreams;i++)
-    datastreamids[i] = FxManager::FIRSTTELESCOPEID + i;
+    datastreamids[i] = fxcorr::FIRSTTELESCOPEID + i;
 
   //wait until everyone has caught up
   MPI_Barrier(world);
 
+#ifdef HAVE_DIFXMESSAGE
+  {
+    char identifier[128];
+    generateIdentifier(argv[1], myID, numdatastreams, identifier);
+    difxMessageInit(myID, identifier);
+  }
+#endif
+
   try
   {
     //work out what process we are and run accordingly
-    if(myID == FxManager::MANAGERID) //im the manager
+    if(myID == fxcorr::MANAGERID) //im the manager
     {
       manager = new FxManager(config, numcores, datastreamids, coreids, myID, return_comm, monitor, monhostname, port, monitor_skip);
       MPI_Barrier(world);
@@ -206,17 +245,13 @@ int main(int argc, char *argv[])
       t2 = MPI_Wtime();
       cout << "Total wallclock time was **" << t2 - t1 << "** seconds" << endl;
     }
-    else if (myID >= FxManager::FIRSTTELESCOPEID && myID < FxManager::FIRSTTELESCOPEID + numdatastreams) //im a datastream
+    else if (myID >= fxcorr::FIRSTTELESCOPEID && myID < fxcorr::FIRSTTELESCOPEID + numdatastreams) //im a datastream
     {
-      int datastreamnum = myID - FxManager::FIRSTTELESCOPEID;
+      int datastreamnum = myID - fxcorr::FIRSTTELESCOPEID;
       if(config->isMkV(datastreamnum)) {
         stream = new Mk5DataStream(config, datastreamnum, myID, numcores, coreids, config->getDDataBufferFactor(), config->getDNumDataSegments());
-        //send a message to all the Cores telling them what the framebytes is
-        mkvcontrol[0] = config->getFrameBytes(0,datastreamnum);
-        mkvcontrol[1] = config->getMkVFormat(0, datastreamnum);
-        for(int i=0;i<numcores;i++)
-          MPI_Send(&mkvcontrol, 2, MPI_INT, coreids[i], MKV_CONTROL, MPI_COMM_WORLD);
-      }
+      } else if(config->isNativeMkV(datastreamnum))
+        stream = new NativeMk5DataStream(config, datastreamnum, myID, numcores, coreids, config->getDDataBufferFactor(), config->getDNumDataSegments());
       else
         stream = new DataStream(config, datastreamnum, myID, numcores, coreids, config->getDDataBufferFactor(), config->getDNumDataSegments());
       stream->initialise();
@@ -225,17 +260,6 @@ int main(int argc, char *argv[])
     }
     else //im a processing core
     {
-      //Loop through storing the framebytes in the config if we have any MkV Datastreams
-      for(int i=0;i<numdatastreams;i++)
-      {
-        if(config->isMkV(i)) {
-          MPI_Recv(mkvcontrol, 2, MPI_INT, datastreamids[i], MKV_CONTROL, MPI_COMM_WORLD, &status);
-          for(int j=0;j<config->getNumConfigs();j++) {
-            config->setFrameBytes(j, i, mkvcontrol[0]);
-            config->setMkVFormat(j, i, mkvcontrol[1]);
-          }
-        }
-      }
       core = new Core(myID, config, datastreamids, return_comm);
       MPI_Barrier(world);
       core->execute();
@@ -250,6 +274,13 @@ int main(int argc, char *argv[])
   MPI_Finalize();
   delete [] coreids;
   delete [] datastreamids;
+
+  if(manager) delete manager;
+  if(stream) delete stream;
+  if(core) delete core;
+
+#ifdef HAVE_DIFXMESSAGE
+#endif
 
   std::cout << myID << ": BYE!" << endl;
   return EXIT_SUCCESS;

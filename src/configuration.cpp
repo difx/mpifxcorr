@@ -9,19 +9,12 @@
  *   but WITHOUT ANY WARRANTY; without even the implied warranty of        *
  *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.                  *
  ***************************************************************************/
-//===============================================================================
-// SVN properties (DO NOT CHANGE)
-//
-// $HeadURL$
-// $LastChangedRevision$
-// $Author$
-// $LastChangedDate$
-//
-//===============================================================================
+#include <mpi.h>
 #include "configuration.h"
 #include "mode.h"
 #include "datastream.h"
 #include "mk5.h"
+#include "nativemk5.h"
 
 Configuration::Configuration(const char * configfile)
 {
@@ -87,6 +80,8 @@ Configuration::Configuration(const char * configfile)
         }
         processNetworkTable(input);
         break;
+      default:
+        break;
     }
     currentheader = getSectionHeader(input);
   }
@@ -97,8 +92,8 @@ Configuration::Configuration(const char * configfile)
   }
   input->close();
   delete input;
-  consistencyCheck();
-  cout << "Finished processing input file!!!" << endl;
+  consistencyok = consistencyCheck();
+//  cout << "Finished processing input file!!!" << endl;
 }
 
 
@@ -152,6 +147,62 @@ Configuration::~Configuration()
   delete [] baselinetable;
   delete [] numprocessthreads;
   delete [] firstnaturalconfigindices;
+}
+
+int Configuration::getFramePayloadBytes(int configindex, int configdatastreamindex)
+{
+  int payloadsize;
+  int framebytes = getFrameBytes(configindex, configdatastreamindex);
+  dataformat format = getDataFormat(configindex, configdatastreamindex);
+  
+  switch(format)
+  {
+    case VLBA:
+      payloadsize = (framebytes/2520)*2500;
+      break;
+    case MARK5B:
+      payloadsize = framebytes - 16;
+      break;
+    default:
+      payloadsize = framebytes;
+  }
+
+  return payloadsize;
+}
+
+void Configuration::getFrameInc(int configindex, int configdatastreamindex, int &sec, int &ns)
+{
+  int nchan, qb, decimationfactor;
+  int payloadsize;
+  double samplerate; /* in Hz */
+  double seconds;
+
+  nchan = getDNumInputBands(configindex, configdatastreamindex);
+  samplerate = 2.0e6*getDBandwidth(configindex, configdatastreamindex, 0);
+  qb = getDNumBits(configindex, configdatastreamindex);
+  decimationfactor = getDecimationFactor(configindex);
+  payloadsize = getFramePayloadBytes(configindex, configdatastreamindex);
+
+  seconds = payloadsize*8/(samplerate*nchan*qb*decimationfactor);
+  sec = int(seconds);
+  ns = int(1.0e9*(seconds - sec));
+}
+
+int Configuration::getFramesPerSecond(int configindex, int configdatastreamindex)
+{
+  int nchan, qb, decimationfactor;
+  int payloadsize;
+  double samplerate; /* in Hz */
+  double seconds;
+
+  nchan = getDNumInputBands(configindex, configdatastreamindex);
+  samplerate = 2.0e6*getDBandwidth(configindex, configdatastreamindex, 0);
+  qb = getDNumBits(configindex, configdatastreamindex);
+  decimationfactor = getDecimationFactor(configindex);
+  payloadsize = getFramePayloadBytes(configindex, configdatastreamindex);
+
+  // This will always work out to be an integer 
+  return int(samplerate*nchan*qb*decimationfactor/(8*payloadsize) + 0.5);
 }
 
 int Configuration::getMaxResultLength()
@@ -288,11 +339,11 @@ int Configuration::getResultLength(int configindex)
 int Configuration::getDataBytes(int configindex, int datastreamindex)
 {
   datastreamdata currentds = datastreamtable[configs[configindex].datastreamindices[datastreamindex]];
-  int validlength = (configs[configindex].blockspersend*currentds.numinputbands*2*currentds.numbits*configs[configindex].numchannels)/8;
-  if(currentds.format == MKV || currentds.format == MKV_MKIV || currentds.format == MKV_VLBA)
+  int validlength = (configs[configindex].decimationfactor*configs[configindex].blockspersend*currentds.numinputbands*2*currentds.numbits*configs[configindex].numchannels)/8;
+  if(currentds.format == MKIV || currentds.format == VLBA || currentds.format == MARK5B)
   {
     //must be an integer number of frames, with enough margin for overlap on either side
-    validlength += (configs[configindex].guardblocks*currentds.numinputbands*2*currentds.numbits*configs[configindex].numchannels)/8;
+    validlength += (configs[configindex].decimationfactor*configs[configindex].guardblocks*currentds.numinputbands*2*currentds.numbits*configs[configindex].numchannels)/8;
     return ((validlength/currentds.framebytes)+2)*currentds.framebytes;
   }
   else
@@ -373,79 +424,6 @@ bool Configuration::stationUsed(int telescopeindex)
   return toreturn;
 }
 
-void Configuration::findMkVFormat(int configindex, int configdatastreamindex)
-{
-  long long maxoffset;
-  int lastoffset;
-  int mboffset = 0;
-  bool lastok = false;
-  bool beforelastok = false;
-  VLBA_stream * vs;
-  datastreamdata * ds = &(datastreamtable[configs[configindex].datastreamindices[configdatastreamindex]]);
-
-  if(ds->numdatafiles > 0) //open up a file and sort some stuff out
-  {
-    //check every MB into the file for 10 MB until we get two in a row that agree - handles the case of possible sync errors
-    while(mboffset < 10 && !(lastok && beforelastok))
-    {
-      beforelastok = lastok;
-      vs = VLBA_stream_open((ds->datafilenames[0]).c_str(), ds->numbits, ds->fanout, mboffset*1048576/*offset*/);
-      if(vs != 0) //found the sync
-      {
-        lastok = true;
-        if(vs->format == FORMAT_VLBA)
-          ds->format = MKV_VLBA;
-        else if(vs->format == FORMAT_MARK4)
-          ds->format = MKV_MKIV;
-        else
-        {
-          lastok = false;
-          ds->format = MKV;
-        }
-        if(ds->format == MKV_VLBA || ds->format == MKV_MKIV)
-        {
-          ds->framebytes = vs->gulpsize;
-          if(((mboffset*1048576 + vs->fileoffset - lastoffset) % vs->gulpsize) != 0)
-            beforelastok = false;
-
-          lastoffset = mboffset*1048576 + vs->fileoffset;
-        }
-        VLBA_stream_close(vs);
-      }
-      else
-        lastok = false;
-      mboffset++;
-    }
-    if(!lastok || !beforelastok)
-    {
-      cerr << "Error opening MkV style file " << ds->datafilenames[0] << " for datastream " << configdatastreamindex << " - could not find sync in first 10 MB - aborting!!!";
-      exit(1);
-    }
-  }
-}
-
-int Configuration::getMkVFormat(int configindex, int configdatastreamindex)
-{
-  if(datastreamtable[configs[configindex].datastreamindices[configdatastreamindex]].format != MKV_VLBA &&  datastreamtable[configs[configindex].datastreamindices[configdatastreamindex]].format != MKV_MKIV && 
-  datastreamtable[configs[configindex].datastreamindices[configdatastreamindex]].numdatafiles > 0)
-  {
-    cerr << "Error trying to retrieve MkV format for configindex " << configindex << ", datastream " << configdatastreamindex << ": had not been updated from general MkV!!" << endl;
-    exit(1);
-  }
-
-  return (datastreamtable[configs[configindex].datastreamindices[configdatastreamindex]].format == MKV_VLBA)?FORMAT_VLBA:FORMAT_MARK4;
-}
-
-void Configuration::setMkVFormat(int configindex, int configdatastreamindex, int format)
-{
-  if(format != FORMAT_VLBA && format != FORMAT_MARK4)
-  {
-    cerr << "Error trying to set MkV format for configindex " << configindex << ", datastream " << configdatastreamindex << ": had not been updated from general MkV!!" << endl;
-    exit(1);
-  }
-  datastreamtable[configs[configindex].datastreamindices[configdatastreamindex]].format = ((format == FORMAT_VLBA)?MKV_VLBA:MKV_MKIV);
-}
-
 int Configuration::getConfigIndex(int offsetseconds)
 {
   int currentconfigindex;
@@ -472,28 +450,31 @@ Mode* Configuration::getMode(int configindex, int datastreamindex)
 {
   configdata conf = configs[configindex];
   datastreamdata stream = datastreamtable[conf.datastreamindices[datastreamindex]];
+  int framesamples, framebytes;
 
   switch(stream.format)
   {
     case LBASTD:
       if(stream.numbits != 2)
         cerr << "ERROR! All LBASTD Modes must have 2 bit sampling - overriding input specification!!!" << endl;
-      return new LBAMode(this, configindex, datastreamindex, conf.numchannels, conf.blockspersend, conf.guardblocks, stream.numfreqs, freqtable[stream.freqtableindices[0]].bandwidth, stream.freqclockoffsets, stream.numinputbands, stream.numoutputbands, 2/*bits*/, stream.filterbank, conf.pulsarbin, conf.scrunchoutput, conf.postffringerot, conf.quadraticdelayinterp, conf.writeautocorrs, LBAMode::stdunpackvalues);
+      return new LBAMode(this, configindex, datastreamindex, conf.numchannels, conf.blockspersend, conf.guardblocks, stream.numfreqs, freqtable[stream.freqtableindices[0]].bandwidth, stream.freqclockoffsets, stream.numinputbands, stream.numoutputbands, 2/*bits*/, stream.filterbank, conf.postffringerot, conf.quadraticdelayinterp, conf.writeautocorrs, LBAMode::stdunpackvalues);
       break;
     case LBAVSOP:
       if(stream.numbits != 2)
         cerr << "ERROR! All LBASTD Modes must have 2 bit sampling - overriding input specification!!!" << endl;
-      return new LBAMode(this, configindex, datastreamindex, conf.numchannels, conf.blockspersend, conf.guardblocks, stream.numfreqs, freqtable[stream.freqtableindices[0]].bandwidth, stream.freqclockoffsets, stream.numinputbands, stream.numoutputbands, 2/*bits*/, stream.filterbank, conf.pulsarbin, conf.scrunchoutput, conf.postffringerot, conf.quadraticdelayinterp, conf.writeautocorrs, LBAMode::vsopunpackvalues);
+      return new LBAMode(this, configindex, datastreamindex, conf.numchannels, conf.blockspersend, conf.guardblocks, stream.numfreqs, freqtable[stream.freqtableindices[0]].bandwidth, stream.freqclockoffsets, stream.numinputbands, stream.numoutputbands, 2/*bits*/, stream.filterbank, conf.postffringerot, conf.quadraticdelayinterp, conf.writeautocorrs, LBAMode::vsopunpackvalues);
       break;
-    case MKV:
-    case MKV_MKIV:
-    case MKV_VLBA:
-      return new Mk5Mode(this, configindex, datastreamindex, stream.fanout, conf.numchannels, conf.blockspersend, conf.guardblocks, stream.numfreqs, freqtable[stream.freqtableindices[0]].bandwidth, stream.freqclockoffsets, stream.numinputbands, stream.numoutputbands, stream.numbits, stream.filterbank, conf.pulsarbin, conf.scrunchoutput, conf.postffringerot, conf.quadraticdelayinterp, conf.writeautocorrs, stream.framebytes);
+    case MKIV:
+    case VLBA:
+    case MARK5B:
+      framesamples = getFramePayloadBytes(configindex, datastreamindex)*8/(getDNumBits(configindex, datastreamindex)*getDNumInputBands(configindex, datastreamindex)*conf.decimationfactor);
+      framebytes = getFrameBytes(configindex, datastreamindex);
+      return new Mk5Mode(this, configindex, datastreamindex, conf.numchannels, conf.blockspersend, conf.guardblocks, stream.numfreqs, freqtable[stream.freqtableindices[0]].bandwidth, stream.freqclockoffsets, stream.numinputbands, stream.numoutputbands, stream.numbits, stream.filterbank, conf.postffringerot, conf.quadraticdelayinterp, conf.writeautocorrs, framebytes, framesamples, stream.format);
       break;
+    default:
+      cerr << "Error - unknown Mode!!!" << endl;
+      return NULL;
   }
-
-  cerr << "Error - unknown Mode!!!" << endl;
-  return NULL;
 }
 
 Configuration::sectionheader Configuration::getSectionHeader(ifstream * input)
@@ -594,20 +575,21 @@ void Configuration::processCommon(ifstream * input)
   executeseconds = atoi(line.c_str());
   getinputline(input, &line, "START MJD");
   startmjd = atoi(line.c_str());
-  getinputline(input, &line, "START SECONDS");
+  getinputline(input, &line, "START SECONDS");  // FIXME -- look for fractional seconds -> startns
   startseconds = atoi(line.c_str());
+  startns = 0;
   getinputline(input, &line, "ACTIVE DATASTREAMS");
   numdatastreams = atoi(line.c_str());
   getinputline(input, &line, "ACTIVE BASELINES");
   numbaselines = atoi(line.c_str());
-  getinputline(input, &line, "DATA HEADER O/RIDE");
-  dataoverride = ((line == "TRUE") || (line == "T") || (line == "true") || (line == "t"))?true:false;
+  getinputline(input, &line, "VIS BUFFER LENGTH");
+  visbufferlength = atoi(line.c_str());
   getinputline(input, &line, "OUTPUT FORMAT");
   if(line == "RPFITS")
   {
     outformat = RPFITS;
   }
-  else if(line == "SWIN")
+  else if(line == "SWIN" || line == "DIFX")
   {
     outformat = DIFX;
   }
@@ -651,6 +633,12 @@ void Configuration::processConfig(ifstream * input)
     configs[i].inttime = atof(line.c_str());
     getinputline(input, &line, "NUM CHANNELS");
     configs[i].numchannels = atoi(line.c_str());
+    getinputline(input, &line, "CHANNELS TO AVERAGE");
+    configs[i].channelstoaverage = atoi(line.c_str());
+    getinputline(input, &line, "OVERSAMPLE FACTOR");
+    configs[i].oversamplefactor = atoi(line.c_str());
+    getinputline(input, &line, "DECIMATION FACTOR");
+    configs[i].decimationfactor = atoi(line.c_str());
     configs[i].independentchannelindex = i;
     for(int j=numindependentchannelconfigs-1;j>=0;j--)
     {
@@ -698,7 +686,7 @@ void Configuration::processConfig(ifstream * input)
   }
   if(defaultconfigindex < 0)
   {
-    cerr << "Warning - no default config found - sources which were not specified will not be correlated!!!" << endl;
+//    cerr << "Warning - no default config found - sources which were not specified will not be correlated!!!" << endl;
   }
 
   configread = true;
@@ -728,6 +716,31 @@ void Configuration::processDatastreamTable(ifstream * input)
 
   for(int i=0;i<datastreamtablelength;i++)
   {
+    int configindex=-1;
+    int decimationfactor;
+
+    //get configuration index for this datastream
+    for(int c=0; c<numconfigs; c++)
+    {
+      for(int d=0; d<numdatastreams; d++)
+      {
+        if(configs[c].datastreamindices[d] == i)
+        {
+          configindex = c;
+          break;
+        }
+      }
+      if(configindex >= 0) break;
+    }
+
+    if(configindex < 0)
+    {
+      cerr << "Error - no config found for datastream " << i << endl;
+      exit(1);
+    }
+
+    decimationfactor = configs[configindex].decimationfactor;
+
     //read all the info for this datastream
     getinputline(input, &line, "TELESCOPE INDEX");
     datastreamtable[i].telescopeindex = atoi(line.c_str());
@@ -738,29 +751,44 @@ void Configuration::processDatastreamTable(ifstream * input)
       datastreamtable[i].format = LBASTD;
     else if(line == "LBAVSOP")
       datastreamtable[i].format = LBAVSOP;
-    else if(line == "MKV")
-    {
-      datastreamtable[i].format = MKV;
-      getinputline(input, &line, "FANOUT");
-      datastreamtable[i].fanout = atoi(line.c_str());
-    }
     else if(line == "NZ")
       datastreamtable[i].format = NZ;
     else if(line == "K5")
       datastreamtable[i].format = K5;
+    else if(line == "MKIV")
+      datastreamtable[i].format = MKIV;
+    else if(line == "VLBA")
+      datastreamtable[i].format = VLBA;
+    else if(line == "MARK5B")
+      datastreamtable[i].format = MARK5B;
     else
     {
-      cerr << "Unnkown data format " << line << " (case sensitive choices are LBASTD, LBAVSOP, MKV, NZ and K5) - assuming LBASTD!!!" << endl;
-      datastreamtable[i].format = LBASTD;
+      cerr << "Unknown data format " << line << " (case sensitive choices are LBASTD, LBAVSOP, NZ, K5, MKIV, VLBA, and MARK5B)" << endl;
+      exit(1);
     }
     getinputline(input, &line, "QUANTISATION BITS");
     datastreamtable[i].numbits = atoi(line.c_str());
+
+    getinputline(input, &line, "DATA FRAME SIZE");
+    datastreamtable[i].framebytes = atoi(line.c_str());
+
+    getinputline(input, &line, "DATA SOURCE");
+    if(line == "FILE")
+      datastreamtable[i].source = UNIXFILE;
+    else if(line == "MODULE")
+      datastreamtable[i].source = MK5MODULE;
+    else if(line == "EVLBI")
+      datastreamtable[i].source = EVLBI;
+    else
+    {
+      cerr << "Unnkown data source " << line << " (case sensitive choices are FILE, MK5MODULE and EVLBI)" << endl;
+      exit(1);
+    }
+
     getinputline(input, &line, "FILTERBANK USED");
     datastreamtable[i].filterbank = ((line == "TRUE") || (line == "T") || (line == "true") || (line == "t"))?true:false;
     if(datastreamtable[i].filterbank)
       cerr << "Error - filterbank not yet supported!!!" << endl;
-    getinputline(input, &line, "READ FROM FILE");
-    datastreamtable[i].readfromfile = ((line == "TRUE") || (line == "T") || (line == "true") || (line == "t"))?true:false;
     getinputline(input, &line, "NUM FREQS");
     datastreamtable[i].numfreqs = atoi(line.c_str());
     datastreamtable[i].freqpols = new int[datastreamtable[i].numfreqs];
@@ -777,11 +805,11 @@ void Configuration::processDatastreamTable(ifstream * input)
       datastreamtable[i].freqpols[j] = atoi(line.c_str());
       datastreamtable[i].numinputbands += datastreamtable[i].freqpols[j];
     }
-    datastreamtable[i].bytespersamplenum = (datastreamtable[i].numinputbands*datastreamtable[i].numbits)/8;
+    datastreamtable[i].bytespersamplenum = (datastreamtable[i].numinputbands*datastreamtable[i].numbits*decimationfactor)/8;
     if(datastreamtable[i].bytespersamplenum == 0)
     {
       datastreamtable[i].bytespersamplenum = 1;
-      datastreamtable[i].bytespersampledenom = 8/(datastreamtable[i].numinputbands*datastreamtable[i].numbits);
+      datastreamtable[i].bytespersampledenom = 8/(datastreamtable[i].numinputbands*datastreamtable[i].numbits*decimationfactor);
     }
     else
       datastreamtable[i].bytespersampledenom = 1;
@@ -797,11 +825,6 @@ void Configuration::processDatastreamTable(ifstream * input)
       datastreamtable[i].inputbandlocalfreqindices[j] = atoi(line.c_str());
       if(datastreamtable[i].inputbandlocalfreqindices[j] >= datastreamtable[i].numfreqs)
         cerr << "Error - attempting to refer to freq outside local table!!!" << endl;
-    }
-    if(datastreamtable[i].format == MKV)
-    {
-      //put in a default worstcase for framesize
-      datastreamtable[i].framebytes = (datastreamtable[i].fanout*datastreamtable[i].numbits*datastreamtable[i].numinputbands*FRAMESIZE)/8;
     }
   }
 
@@ -911,7 +934,7 @@ void Configuration::processNetworkTable(ifstream * input)
   }
 }
 
-void Configuration::consistencyCheck()
+bool Configuration::consistencyCheck()
 {
   int tindex, count;
   double bandwidth, sampletimens, ffttime, nsincrement;
@@ -923,7 +946,7 @@ void Configuration::consistencyCheck()
     if(datastreamtable[i].telescopeindex < 0 || datastreamtable[i].telescopeindex >= telescopetablelength)
     {
       cerr << "Error!!! Datastream table entry " << i << " has a telescope index that refers outside the telescope table range (" << datastreamtable[i].telescopeindex << ")- aborting!!!" << endl;
-      exit(1);
+      return false;
     }
 
     //check the local freq indices are all ok
@@ -932,7 +955,7 @@ void Configuration::consistencyCheck()
       if(datastreamtable[i].inputbandlocalfreqindices[j] < 0 || datastreamtable[i].inputbandlocalfreqindices[j] >= datastreamtable[i].numfreqs)
       {
         cerr << "Error!!! Datastream table entry " << i << " has an input band local frequency index (band " << j << ") that refers outside the local frequency table range (" << datastreamtable[i].inputbandlocalfreqindices[j] << ")- aborting!!!" << endl;
-        exit(1);
+        return false;
       }
     }
 
@@ -943,12 +966,12 @@ void Configuration::consistencyCheck()
       if(datastreamtable[i].freqtableindices[j] < 0 || datastreamtable[i].freqtableindices[j] >= freqtablelength)
       {
         cerr << "Error!!! Datastream table entry " << i << " has a frequency index (freq " << j << ") that refers outside the frequency table range (" << datastreamtable[i].freqtableindices[j] << ")- aborting!!!" << endl;
-        exit(1);
+        return false;
       }
       if(bandwidth != freqtable[datastreamtable[i].freqtableindices[j]].bandwidth)
       {
         cerr << "Error - all bandwidths for a given datastream must be equal - Aborting!!!!" << endl;
-        exit(1);
+        return false;
       }
     }
   }
@@ -962,7 +985,7 @@ void Configuration::consistencyCheck()
       if(tindex != datastreamtable[configs[0].datastreamindices[i]].telescopeindex)
       {
         cerr << "Error - all configs must have the same telescopes!  Config " << j << " datastream " << i << " refers to different telescopes - aborting!!!" << endl;
-        exit(1);
+        return false;
       }
     }
   }
@@ -984,7 +1007,14 @@ void Configuration::consistencyCheck()
     if(count != numdatastreams)
     {
       cerr << "Error - not all datastreams accounted for in the datastream table for config " << i << endl;
-      exit(1);
+      return false;
+    }
+
+    //check that oversamplefactor >= decimationfactor
+    if(configs[i].oversamplefactor < configs[i].decimationfactor)
+    {
+      cerr << "Error - oversamplefactor (" << configs[i].oversamplefactor << ") is less than decimation factor (" << configs[i].decimationfactor << ") - aborting!!!" << endl;
+      return false;
     }
 
     //check that number of channels * sample time yields a whole number of nanoseconds for every datastream
@@ -996,12 +1026,12 @@ void Configuration::consistencyCheck()
       if(ffttime - (int)(ffttime+0.5) > 0.00000001 || ffttime - (int)(ffttime+0.5) < -0.000000001)
       {
         cerr << "Error - FFT chunk time for config " << i << ", datastream " << j << " is not a whole number of nanoseconds (" << ffttime << ") - aborting!!!" << endl;
-        exit(1);
+        return false;
       }
       if(nsincrement > ((1 << (sizeof(int)*8 - 1)) - 1))
       {
         cerr << "Error - increment per read in nanoseconds is " << nsincrement << " - too large to fit in an int.  ABORTING" << endl;
-        exit(1);
+        return false;
       }
     }
 
@@ -1013,12 +1043,12 @@ void Configuration::consistencyCheck()
       if(b < 0 || b >= baselinetablelength) //bad index
       {
         cerr << "Error - config " << i << " baseline index " << j << " refers to baseline " << b << " which is outside the range of the baseline table - aborting!!!" << endl;
-        exit(1);
+        return false;
       }
       if(datastreamtable[baselinetable[b].datastream2index].telescopeindex < lastt2 && datastreamtable[baselinetable[b].datastream1index].telescopeindex <= lastt1)
       {
         cerr << "Error - config " << i << " baseline index " << j << " refers to baseline " << datastreamtable[baselinetable[b].datastream2index].telescopeindex << "-" << datastreamtable[baselinetable[b].datastream1index].telescopeindex << " which is out of order with the previous baseline " << lastt1 << "-" << lastt2 << " - aborting!!!" << endl;
-        exit(1);
+        return false;
       }
       lastt1 = datastreamtable[baselinetable[b].datastream1index].telescopeindex;
       lastt2 = datastreamtable[baselinetable[b].datastream2index].telescopeindex;
@@ -1032,7 +1062,7 @@ void Configuration::consistencyCheck()
     if(baselinetable[i].datastream1index < 0 || baselinetable[i].datastream2index < 0 || baselinetable[i].datastream1index >= datastreamtablelength || baselinetable[i].datastream2index >= datastreamtablelength)
     {
       cerr << "Error - baseline table entry " << i << " has a datastream index outside the datastream table range! Its two indices are " << baselinetable[i].datastream1index << ", " << baselinetable[i].datastream2index << ".  ABORTING" << endl;
-      exit(1);
+      return false;
     }
 
     //check the band indices
@@ -1043,12 +1073,12 @@ void Configuration::consistencyCheck()
         if(baselinetable[i].datastream1bandindex[j][k] < 0 || baselinetable[i].datastream1bandindex[j][k] >= datastreamtable[baselinetable[i].datastream1index].numinputbands)
         {
           cerr << "Error! Baseline table entry " << i << ", frequency " << j << ", polarisation product " << k << " for datastream 1 refers to a band outside datastream 1's range (" << baselinetable[i].datastream1bandindex[j][k] << ") - aborting!!!" << endl;
-          exit(1);
+          return false;
         }
         if(baselinetable[i].datastream2bandindex[j][k] < 0 || baselinetable[i].datastream2bandindex[j][k] >= datastreamtable[baselinetable[i].datastream2index].numinputbands)
         {
           cerr << "Error! Baseline table entry " << i << ", frequency " << j << ", polarisation product " << k << " for datastream 2 refers to a band outside datastream 2's range (" << baselinetable[i].datastream2bandindex[j][k] << ") - aborting!!!" << endl;
-          exit(1);
+          return false;
         }
       }
     }
@@ -1057,8 +1087,10 @@ void Configuration::consistencyCheck()
   if(databufferfactor % numdatasegments != 0)
   {
     cerr << "Error - there must be an integer number of sends per datasegment.  Presently databufferfactor is " << databufferfactor << ", and numdatasegments is " << numdatasegments << ".  ABORTING" << endl;
-    exit(1);
+    return false;
   }
+
+  return true;
 }
 
 void Configuration::processPulsarConfig(string filename, int configindex)
@@ -1113,37 +1145,10 @@ void Configuration::processPulsarConfig(string filename, int configindex)
 
 void Configuration::setPolycoFreqInfo(int configindex)
 {
-  /*datastreamdata d = datastreamtable[getMaxNumFreqDatastreamIndex(configindex)];
-  double * frequencies = new double[d.numfreqs];
-  double bandwidth = freqtable[d.freqtableindices[0]].bandwidth;
-  for(int i=0;i<d.numfreqs;i++)
-  {
-    frequencies[i] = freqtable[d.freqtableindices[i]].bandedgefreq;
-    if(freqtable[d.freqtableindices[i]].lowersideband)
-      frequencies[i] -= bandwidth;
-  }
-  for(int i=0;i<configs[configindex].numpolycos;i++)
-  {
-    configs[configindex].polycos[i]->setFrequencyValues(d.numfreqs, frequencies, bandwidth);
-  }
-  delete [] frequencies;*/
-  /*datastreamdata d = datastreamtable[getMaxNumFreqDatastreamIndex(configindex)];
+  datastreamdata d = datastreamtable[getMaxNumFreqDatastreamIndex(configindex)];
   double * frequencies = new double[datastreamtablelength];
   double bandwidth = freqtable[d.freqtableindices[0]].bandwidth;
   for(int i=0;i<datastreamtablelength;i++)
-  {
-    frequencies[i] = freqtable[i].bandedgefreq;
-    if(freqtable[i].lowersideband)
-      frequencies[i] -= freqtable[i].bandwidth;
-  }
-  for(int i=0;i<configs[configindex].numpolycos;i++)
-  {
-    configs[configindex].polycos[i]->setFrequencyValues(freqtablelength, frequencies, bandwidth);
-  }
-  delete [] frequencies;*/
-  double * frequencies = new double[freqtablelength];
-  double bandwidth = freqtable[(datastreamtable[getMaxNumFreqDatastreamIndex(configindex)]).freqtableindices[0]].bandwidth;
-  for(int i=0;i<freqtablelength;i++)
   {
     frequencies[i] = freqtable[i].bandedgefreq;
     if(freqtable[i].lowersideband)

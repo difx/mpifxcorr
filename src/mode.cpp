@@ -9,17 +9,7 @@
  *   but WITHOUT ANY WARRANTY; without even the implied warranty of        *
  *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.                  *
  ***************************************************************************/
-
-//===============================================================================
-// SVN properties (DO NOT CHANGE)
-//
-// $HeadURL$
-// $LastChangedRevision$
-// $Author$
-// $LastChangedDate$
-//
-//===============================================================================
-
+#include <mpi.h>
 #include "mode.h"
 #include "math.h"
 #include "architecture.h"
@@ -29,10 +19,11 @@
 //using namespace std;
 const float Mode::TINY = 0.000000001;
 
-Mode::Mode(Configuration * conf, int confindex, int dsindex, int nchan, int bpersend, int gblocks, int nfreqs, double bw, double * freqclkoffsets, int ninputbands, int noutputbands, int nbits, int unpacksamp, bool fbank, bool pbin, bool pscrunch, bool postffringe, bool quaddelayinterp, bool cacorrs, double bclock)
-  : config(conf), configindex(confindex), datastreamindex(dsindex), numchannels(nchan), blockspersend(bpersend), guardblocks(gblocks), twicenumchannels(nchan*2), numfreqs(nfreqs), bandwidth(bw), freqclockoffsets(freqclkoffsets), numinputbands(ninputbands), numoutputbands(noutputbands), numbits(nbits), unpacksamples(unpacksamp), filterbank(fbank), pulsarbin(pbin), scrunchpulsaroutputs(pscrunch), postffringerot(postffringe), quadraticdelayinterp(quaddelayinterp), calccrosspolautocorrs(cacorrs), blockclock(bclock)
+Mode::Mode(Configuration * conf, int confindex, int dsindex, int nchan, int bpersend, int gblocks, int nfreqs, double bw, double * freqclkoffsets, int ninputbands, int noutputbands, int nbits, int unpacksamp, bool fbank, bool postffringe, bool quaddelayinterp, bool cacorrs, double bclock)
+  : config(conf), configindex(confindex), datastreamindex(dsindex), numchannels(nchan), blockspersend(bpersend), guardblocks(gblocks), twicenumchannels(nchan*2), numfreqs(nfreqs), bandwidth(bw), freqclockoffsets(freqclkoffsets), numinputbands(ninputbands), numoutputbands(noutputbands), numbits(nbits), unpacksamples(unpacksamp), filterbank(fbank), postffringerot(postffringe), quadraticdelayinterp(quaddelayinterp), calccrosspolautocorrs(cacorrs), blockclock(bclock)
 {
   int status;
+  int decimationfactor = config->getDecimationFactor(configindex);
 
   sampletime = 1.0/(2.0*bandwidth); //microseconds
   processtime = twicenumchannels*sampletime; //microseconds
@@ -47,11 +38,11 @@ Mode::Mode(Configuration * conf, int confindex, int dsindex, int nchan, int bper
   samplesperblock = int(bandwidth*2/blockclock);
   if(samplesperblock == 0)
     cerr << "Error!!! Samplesperblock is < 1, current implementation cannot handle this situation.  Aborting!" << endl;
-  bytesperblocknumerator = (numinputbands*samplesperblock*numbits)/8;
+  bytesperblocknumerator = (numinputbands*samplesperblock*numbits*decimationfactor)/8;
   if(bytesperblocknumerator == 0)
   {
     bytesperblocknumerator = 1;
-    bytesperblockdenominator = 8/(numinputbands*samplesperblock*numbits);
+    bytesperblockdenominator = 8/(numinputbands*samplesperblock*numbits*decimationfactor);
     unpacksamples += bytesperblockdenominator*sizeof(u16)*samplesperblock;
   }
   else
@@ -112,10 +103,18 @@ Mode::Mode(Configuration * conf, int confindex, int dsindex, int nchan, int bper
     status = vectorGetFFTBufSizeC_f32(pFFTSpecC, &fftbuffersize);
     if(status != vecNoErr)
       cerr << "Error in FFT buffer size calculation!!!" << status << endl;
+    //zero the Nyquist channel for every band - that is where the weight will be stored on all
+    //baselines (the imag part) so the datastream channel for it must be zeroed
     for(int i=0;i<numinputbands;i++)
     {
-      fftoutputs[i][numchannels].re = 0.0;
-      fftoutputs[i][numchannels].im = 0.0;
+      if(config->getDLowerSideband(configindex, datastreamindex, config->getDLocalFreqIndex(configindex, datastreamindex, i))) {
+        fftoutputs[i][0].re = 0.0;
+        fftoutputs[i][0].im = 0.0;
+      }
+      else {
+        fftoutputs[i][numchannels].re = 0.0;
+        fftoutputs[i][numchannels].im = 0.0;
+      }
     }
   }
   fftbuffer = vectorAlloc_u8(fftbuffersize);
@@ -152,7 +151,9 @@ Mode::Mode(Configuration * conf, int confindex, int dsindex, int nchan, int bper
 Mode::~Mode()
 {
   int status;
+#ifndef QUIET
   cout << "Starting a mode destructor" << endl;
+#endif
 
   for(int i=0;i<numinputbands;i++)
   {
@@ -204,10 +205,12 @@ Mode::~Mode()
   }
   delete [] autocorrelations;
 
+#ifndef QUIET
   cout << "Ending a mode destructor" << endl;
+#endif
 }
 
-void Mode::unpack(int sampleoffset)
+float Mode::unpack(int sampleoffset)
 {
   int status, leftoversamples, stepin = 0;
 
@@ -224,26 +227,32 @@ void Mode::unpack(int sampleoffset)
   for(int i=0;i<numlookups;i++)
   {
     status = vectorCopy_s16(&lookup[packed[i]*samplesperlookup], &linearunpacked[i*samplesperlookup], samplesperlookup);
-    if(status != vecNoErr)
+    if(status != vecNoErr) {
       cerr << "Error in lookup for unpacking!!!" << status << endl;
+      return 0;
+    }
   }
 
   //split the linear unpacked array into the separate subbands
   status = vectorSplitScaled_s16f32(&(linearunpacked[stepin*numinputbands]), unpackedarrays, numinputbands, unpacksamples);
-  if(status != vecNoErr)
+  if(status != vecNoErr) {
     cerr << "Error in splitting linearunpacked!!!" << status << endl;
+    return 0;
+  }
+
+  return 1.0;
 }
 
-int Mode::process(int index)  //frac sample error, fringedelay and wholemicroseconds are in microseconds 
+float Mode::process(int index)  //frac sample error, fringedelay and wholemicroseconds are in microseconds 
 {
   double phaserotation, averagedelay, nearestsampletime, starttime, finaloffset, lofreq, distance;
-  f32 phaserotationfloat, fracsampleerror;
-  int status, count, nearestsample, integerdelay;
+  f32 phaserotationfloat, fracsampleerror, dataweight;
+  int status, count, nearestsample, integerdelay, sidebandoffset;
   cf32* fftptr;
   f32* currentchannelfreqptr;
   int indices[10];
   
-  if(delays[index] < 0 || delays[index+1] < 0)
+  if(datalengthbytes == 0 || delays[index] < 0 || delays[index+1] < 0)
   {
     for(int i=0;i<numinputbands;i++)
     {
@@ -254,27 +263,30 @@ int Mode::process(int index)  //frac sample error, fringedelay and wholemicrosec
       if(status != vecNoErr)
         cerr << "Error trying to zero fftoutputs when data is bad!" << endl;
     }
-    return 0; //don't process crap data
+    return 0.0; //don't process crap data
   }
     
   averagedelay = (delays[index] + delays[index+1])/2.0;
-  starttime = (offsetseconds-bufferseconds)*1000000 + (double(offsetns)/1000.0 + index*twicenumchannels*sampletime - buffermicroseconds) - averagedelay;
+  starttime = (offsetseconds-bufferseconds)*1000000.0 + (double(offsetns)/1000.0 + index*twicenumchannels*sampletime - buffermicroseconds) - averagedelay;
   nearestsample = int(starttime/sampletime + 0.5);
   
   //if we need to, unpack some more data - first check to make sure the pos is valid at all
   if(nearestsample < -1 || (((nearestsample + twicenumchannels)/samplesperblock)*bytesperblocknumerator)/bytesperblockdenominator > datalengthbytes)
   {
     cerr << "MODE error - trying to process data outside range - aborting!!! nearest sample was " << nearestsample << ", the max bytes should be " << datalengthbytes << ".  bufferseconds was " << bufferseconds << ", offsetseconds was " << offsetseconds << ", buffermicroseconds was " << buffermicroseconds << ", offsetns was " << offsetns << ", index was " << index << ", average delay was " << averagedelay << endl;
-    return 0;
+    return 0.0;
   }
   if(nearestsample == -1)
   {
     nearestsample = 0;
-    unpack(nearestsample);
+    dataweight = unpack(nearestsample);
   }
   else if(nearestsample < unpackstartsamples || nearestsample > unpackstartsamples + unpacksamples - twicenumchannels)
     //need to unpack more data
-    unpack(nearestsample);
+    dataweight = unpack(nearestsample);
+
+  if(!(dataweight > 0.0))
+    return 0.0;
 
   nearestsampletime = nearestsample*sampletime;
   fracsampleerror = float(starttime - nearestsampletime);
@@ -416,10 +428,16 @@ int Mode::process(int index)  //frac sample error, fringedelay and wholemicrosec
             cerr << "Error in FFT!!!" << status << endl;
 
           //assemble complex from the real and imaginary
-          if(config->getDLowerSideband(configindex, datastreamindex, i))
-            status = vectorRealToComplex_f32(&realfftd[numchannels], &imagfftd[numchannels], fftoutputs[j], numchannels);
-          else
+          if(config->getDLowerSideband(configindex, datastreamindex, i)) {
+            //updated to include "DC" channel at upper end of LSB band
+            status = vectorRealToComplex_f32(&realfftd[numchannels+1], &imagfftd[numchannels+1], &(fftoutputs[j][1]), numchannels-1);
+            fftoutputs[j][numchannels].re = realfftd[0];
+            fftoutputs[j][numchannels].im = imagfftd[0];
+          }
+          else {
+            //updated to include "Nyquist" channel
             status = vectorRealToComplex_f32(realfftd, imagfftd, fftoutputs[j], numchannels);
+          }
           if(status != vecNoErr)
             cerr << "Error assembling complex fft result" << endl;
         }
@@ -434,10 +452,18 @@ int Mode::process(int index)  //frac sample error, fringedelay and wholemicrosec
         if(status != vecNoErr)
           cerr << "Error in conjugate!!!" << status << endl;
 
-        //do the autocorrelation
-        status = vectorAddProduct_cf32(fftoutputs[j], conjfftoutputs[j], autocorrelations[0][j], numchannels+1);
+        //updated so that Nyquist channel is not accumulated for either USB or LSB data
+        sidebandoffset = 0;
+        if(config->getDLowerSideband(configindex, datastreamindex, i))
+          sidebandoffset = 1;
+
+        //do the autocorrelation (skipping Nyquist channel)
+        status = vectorAddProduct_cf32(fftoutputs[j]+sidebandoffset, conjfftoutputs[j]+sidebandoffset, autocorrelations[0][j]+sidebandoffset, numchannels);
         if(status != vecNoErr)
           cerr << "Error in autocorrelation!!!" << status << endl;
+
+        //Add the weight in magic location (imaginary part of Nyquist channel)
+        autocorrelations[0][j][numchannels*(1-sidebandoffset)].im += dataweight;
       }
     }
 
@@ -445,16 +471,19 @@ int Mode::process(int index)  //frac sample error, fringedelay and wholemicrosec
     if(calccrosspolautocorrs && count > 1)
     {
       //cout << "For frequency " << i << ", datastream " << datastreamindex << " has chosen bands " << indices[0] << " and " << indices[1] << endl; 
-      status = vectorAddProduct_cf32(fftoutputs[indices[0]], conjfftoutputs[indices[1]], autocorrelations[1][indices[0]], numchannels+1);
+      status = vectorAddProduct_cf32(fftoutputs[indices[0]]+sidebandoffset, conjfftoutputs[indices[1]]+sidebandoffset, autocorrelations[1][indices[0]]+sidebandoffset, numchannels);
       if(status != vecNoErr)
         cerr << "Error in cross-polar autocorrelation!!!" << status << endl;
-      status = vectorAddProduct_cf32(fftoutputs[indices[1]], conjfftoutputs[indices[0]], autocorrelations[1][indices[1]], numchannels+1);
+      status = vectorAddProduct_cf32(fftoutputs[indices[1]]+sidebandoffset, conjfftoutputs[indices[0]]+sidebandoffset, autocorrelations[1][indices[1]]+sidebandoffset, numchannels);
       if(status != vecNoErr)
         cerr << "Error in cross-polar autocorrelation!!!" << status << endl;
+      //add the weight in magic location (imaginary part of Nyquist channel)
+      autocorrelations[1][indices[0]][numchannels*(1-sidebandoffset)].im += dataweight;
+      autocorrelations[1][indices[1]][numchannels*(1-sidebandoffset)].im += dataweight;
     }
   }
 
-  return 1;
+  return dataweight;
 }
 
 void Mode::zeroAutocorrelations()
@@ -507,8 +536,8 @@ void Mode::setData(u8 * d, int dbytes, double btime)
 const float Mode::decorrelationpercentage[] = {0.63662, 0.88, 0.94, 0.96, 0.98, 0.99, 0.996, 0.998}; //note these are just approximate!!!
 
 
-LBAMode::LBAMode(Configuration * conf, int confindex, int dsindex, int nchan, int bpersend, int gblocks, int nfreqs, double bw, double * freqclkoffsets, int ninputbands, int noutputbands, int nbits, bool fbank, bool pbin, bool pscrunch, bool postffringe, bool quaddelayinterp, bool cacorrs, const s16* unpackvalues)
-    : Mode(conf,confindex,dsindex,nchan,bpersend,gblocks,nfreqs,bw,freqclkoffsets,ninputbands,noutputbands,nbits,nchan*2,fbank,pbin,pscrunch,postffringe,quaddelayinterp,cacorrs,(bw<16.0)?bw*2.0:32.0)
+LBAMode::LBAMode(Configuration * conf, int confindex, int dsindex, int nchan, int bpersend, int gblocks, int nfreqs, double bw, double * freqclkoffsets, int ninputbands, int noutputbands, int nbits, bool fbank, bool postffringe, bool quaddelayinterp, bool cacorrs, const s16* unpackvalues)
+    : Mode(conf,confindex,dsindex,nchan,bpersend,gblocks,nfreqs,bw,freqclkoffsets,ninputbands,noutputbands,nbits,nchan*2,fbank,postffringe,quaddelayinterp,cacorrs,(bw<16.0)?bw*2.0:32.0)
 {
   int shift, outputshift;
   int count = 0;

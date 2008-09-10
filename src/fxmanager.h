@@ -9,17 +9,6 @@
  *   but WITHOUT ANY WARRANTY; without even the implied warranty of        *
  *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.                  *
  ***************************************************************************/
-
-//===============================================================================
-// SVN properties (DO NOT CHANGE)
-//
-// $HeadURL$
-// $LastChangedRevision$
-// $Author$
-// $LastChangedDate$
-//
-//===============================================================================
-
 #ifndef FXMANAGER_H
 #define FXMANAGER_H
 
@@ -60,16 +49,14 @@ public:
   ~FxManager();
 
  /**
+  * Sends terminate signals to all cores and datastreams
+  */
+  void terminate();
+
+ /**
   * Runs the correlation from the start time to end time
   */
   void execute();
-
-  /// The MPI ID that is always used for the manager
-  static const int MANAGERID = 0;
-  /// The MPI ID that is always used for the first Datastream
-  static const int FIRSTTELESCOPEID = 1;
-  /// The number of Visibility objects employed to allow buffering of returning results from the Core at an uneven rate
-  static const int VISBUFFER_LENGTH = 8;
 
 protected:
  /** 
@@ -137,7 +124,7 @@ private:
 
   //variables
   MPI_Comm return_comm;
-  int numdatastreams, numcores, mpiid, startmjd, startseconds, executetimeseconds, resultlength, numbaselines, nsincrement, currentconfigindex, newestlockedvis, oldestlockedvis, skipseconds;
+  int numdatastreams, numcores, mpiid, startmjd, startseconds, startns, executetimeseconds, resultlength, numbaselines, nsincrement, currentconfigindex, newestlockedvis, oldestlockedvis, skipseconds;
   double inttime, halfsampleseconds;
   bool keepwriting, circularpols, writethreadinitialised;
   int senddata[3]; //targetcoreid, offsetseconds, offsetnanoseconds
@@ -148,7 +135,7 @@ private:
   int * numsent;
   int * extrareceived;
   int *** coretimes;
-  int socket, monitorport, mon_socket;
+  int monitorport, mon_socket;
   char * hostname;
   bool monitor;
   cf32 * resultbuffer;
@@ -157,6 +144,8 @@ private:
   bool * islocked;
   pthread_cond_t writecond;
   pthread_t writethread;
+
+  int lastsource;
 };
 
 #endif

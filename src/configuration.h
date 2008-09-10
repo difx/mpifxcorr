@@ -9,16 +9,6 @@
  *   but WITHOUT ANY WARRANTY; without even the implied warranty of        *
  *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.                  *
  ***************************************************************************/
-//===============================================================================
-// SVN properties (DO NOT CHANGE)
-//
-// $HeadURL$
-// $LastChangedRevision$
-// $Author$
-// $LastChangedDate$
-//
-//===============================================================================
-
 #ifndef CONFIGURATION_H
 #define CONFIGURATION_H
 
@@ -28,7 +18,7 @@
 #include <iostream>
 #include "polyco.h"
 #include "uvw.h"
-#include "vlba_stream.h"
+#include "mark5access.h"
 
 //forward declaration of class Mode
 class Mode;
@@ -49,6 +39,12 @@ public:
   /// Enumeration for the kind of output than can be produced
   enum outputformat {RPFITS, ASCII, DIFX};
 
+  /// Supported types of recorded data format
+  enum dataformat {LBASTD, LBAVSOP, NZ, K5, MKIV, VLBA, MARK5B};
+
+  /// Supported sources of data
+  enum datasource {UNIXFILE, MK5MODULE, EVLBI};
+
   /// Constant for the TCP window size for monitoring
   static const int MONITOR_TCP_WINDOWBYTES = 65536;
 
@@ -64,6 +60,8 @@ public:
   * These methods simply allow other objects access to the configuration information held in tables in the input file for the correlation
   */
 //@{
+  inline int getVisBufferLength() { return visbufferlength; }
+  inline bool consistencyOK() {return consistencyok; }
   inline int getNumConfigs() { return numconfigs; }
   inline int getNumIndependentChannelConfigs() { return numindependentchannelconfigs; }
   inline int getFirstNaturalConfigIndex(int independentchannelindex) { return firstnaturalconfigindices[independentchannelindex]; }
@@ -71,6 +69,8 @@ public:
   inline int getNumChannels(int configindex) { return configs[configindex].numchannels; }
   inline int getBlocksPerSend(int configindex) { return configs[configindex].blockspersend; }
   inline int getGuardBlocks(int configindex) { return configs[configindex].guardblocks; }
+  inline int getOversampleFactor(int configindex) { return configs[configindex].oversamplefactor; }
+  inline int getDecimationFactor(int configindex) { return configs[configindex].decimationfactor; }
   inline double getIntTime(int configindex) { return configs[configindex].inttime; }
   inline bool writeAutoCorrs(int configindex) { return configs[configindex].writeautocorrs; }
   inline outputformat getOutputFormat() { return outformat; }
@@ -157,6 +157,7 @@ public:
   inline int getExecuteSeconds() { return executeseconds; }
   inline int getStartMJD() { return startmjd; }
   inline int getStartSeconds() { return startseconds; }
+  inline int getStartNS() { return startns; }
   inline string getDelayFileName() { return delayfilename; }
   inline int getFreqTableLength() { return freqtablelength; }
   inline double getFreqTableFreq(int index) { return freqtable[index].bandedgefreq; }
@@ -166,11 +167,29 @@ public:
     { return datastreamtable[0].inputbandpols[0] == 'R' || datastreamtable[0].inputbandpols[0] == 'L'; }
   inline int getSourceIndex(int mjd, int sec) { return uvw->getSourceIndex(mjd, sec); }
   inline bool isReadFromFile(int configindex, int configdatastreamindex) 
-    { return datastreamtable[configs[configindex].datastreamindices[configdatastreamindex]].readfromfile; }
-  inline bool isMkV(int datastreamindex) { return datastreamtable[configs[0].datastreamindices[datastreamindex]].format == MKV || datastreamtable[configs[0].datastreamindices[datastreamindex]].format == MKV_MKIV || datastreamtable[configs[0].datastreamindices[datastreamindex]].format == MKV_VLBA; }
-  inline int getFrameBytes(int configindex, int configdatastreamindex) { return datastreamtable[configs[configindex].datastreamindices[configdatastreamindex]].framebytes; }
-  inline int setFrameBytes(int configindex, int configdatastreamindex, int framebytes) { datastreamtable[configs[configindex].datastreamindices[configdatastreamindex]].framebytes = framebytes; }
-  inline int getFanout(int configindex, int configdatastreamindex) { return datastreamtable[configs[configindex].datastreamindices[configdatastreamindex]].fanout; }
+    { return datastreamtable[configs[configindex].datastreamindices[configdatastreamindex]].source != EVLBI; }
+  inline bool isMkV(int datastreamindex) 
+  {
+    dataformat f;
+    datasource s;
+    f = datastreamtable[configs[0].datastreamindices[datastreamindex]].format;
+    s = datastreamtable[configs[0].datastreamindices[datastreamindex]].source;
+    return ((f == MKIV || f == VLBA || f == MARK5B) && (s == UNIXFILE || s == EVLBI)); 
+  }
+  inline bool isNativeMkV(int datastreamindex) 
+  { 
+    dataformat f;
+    datasource s;
+    f = datastreamtable[configs[0].datastreamindices[datastreamindex]].format;
+    s = datastreamtable[configs[0].datastreamindices[datastreamindex]].source;
+    return ((f == MKIV || f == VLBA || f == MARK5B) && s == MK5MODULE); 
+  }
+  inline int getFrameBytes(int configindex, int configdatastreamindex)
+    { return datastreamtable[configs[configindex].datastreamindices[configdatastreamindex]].framebytes; }
+  inline dataformat getDataFormat(int configindex, int configdatastreamindex)
+    { return datastreamtable[configs[configindex].datastreamindices[configdatastreamindex]].format; }
+  inline datasource getDataSource(int configindex, int configdatastreamindex)
+    { return datastreamtable[configs[configindex].datastreamindices[configdatastreamindex]].source; }
   inline double getConfigBandwidth(int configindex) 
     { return freqtable[datastreamtable[configs[configindex].datastreamindices[0]].freqtableindices[0]].bandwidth; }
   inline string getTelescopeName(int telescopeindex)
@@ -178,6 +197,28 @@ public:
   inline int getTelescopeTableLength()
     { return telescopetablelength; }
 //@}
+
+ /**
+  * @param configindex The index of the configuration being used (from the table in the input file)
+  * @param datastreamindex The index of the datastream (from the table in the input file)
+  * @param &sec The output value, seconds portion, returned by reference
+  * @param &ns The output value, nanosec portion, returned by reference
+  */
+  void getFrameInc(int configindex, int configdatastreamindex, int &sec, int &ns);
+
+ /**
+  * @return The number of data frames per second, always an integer for Mark5 formats
+  * @param configindex The index of the configuration being used (from the table in the input file)
+  * @param datastreamindex The index of the datastream (from the table in the input file)
+  */
+  int getFramesPerSecond(int configindex, int configdatastreamindex);
+
+ /**
+  * @return The number of payload bytes in a data frame
+  * @param configindex The index of the configuration being used (from the table in the input file)
+  * @param datastreamindex The index of the datastream (from the table in the input file)
+  */
+  int getFramePayloadBytes(int configindex, int configdatastreamindex);
 
  /**
   * @return The UVW object which contains geometric model information
@@ -203,22 +244,6 @@ public:
   * @param configindex The index of the configuration being used (from the table in the input file)
   * @param configdatastreamindex The index of the datastream in order for that configuration (from the table in the input file)
   */
-  void findMkVFormat(int configindex, int configdatastreamindex);
-
- /**
-  * Returns the kind of MkV format (MkIV or VLBA) being used for a given datastream configuration.  Checks a valid value
-  * is being returned
-  * @param configindex The index of the configuration being used (from the table in the input file)
-  * @param configdatastreamindex The index of the datastream in order for that configuration (from the table in the input file)
-  */
-  int getMkVFormat(int configindex, int configdatastreamindex);
-
- /**
-  * Sets the MkV format (MkIV or VLBA) for a given datastream configuration.  Checks that a valid value is supplied
-  * @param configindex The index of the configuration being used (from the table in the input file)
-  * @param configdatastreamindex The index of the datastream in order for that configuration (from the table in the input file)
-  */
-  void setMkVFormat(int configindex, int configdatastreamindex, int format);
 
  /**
   * @param offsetseconds The offset from the start of the correlation in seconds
@@ -359,9 +384,6 @@ private:
   ///types of sections that can occur within an input file
   enum sectionheader {COMMON, CONFIG, FREQ, TELESCOPE, DATASTREAM, BASELINE, DATA, NETWORK, INPUT_EOF, UNKNOWN};
 
-  ///Supported types of recorded data format
-  enum dataformat {LBASTD, LBAVSOP, MKV, MKV_MKIV, MKV_VLBA, NZ, K5};
-
   ///Storage struct for data from the frequency table of the input file
   typedef struct {
     double bandedgefreq;
@@ -385,6 +407,9 @@ private:
     string sourcename;
     double inttime;
     int numchannels;
+    int channelstoaverage;
+    int oversamplefactor;
+    int decimationfactor;
     int independentchannelindex;
     int blockspersend;
     int guardblocks;
@@ -414,13 +439,14 @@ private:
     int telescopeindex;
     double tsys;
     dataformat format;
+    datasource source;
     int numbits;
     int bytespersamplenum;
     int bytespersampledenom;
-    int fanout;
+    int framesamples;
     int framebytes;
+    int framens;
     bool filterbank;
-    bool readfromfile;
     int numfreqs;
     int * freqpols;
     int * freqtableindices;
@@ -444,8 +470,9 @@ private:
 
  /**
   * Checks a loaded file for consistency - ensuring all frequencies for a given datastream have the same bandwidth etc
+  * @return If the configuration file was parsed without problems, true, else false
   */
-  void consistencyCheck();
+  bool consistencyCheck();
 
  /**
   * Loads the baseline table from the file into memory
@@ -512,8 +539,9 @@ private:
   static const int HEADER_LENGTH = 21;
 
   char header[HEADER_LENGTH];
-  bool commonread, configread, datastreamread, dataoverride;
-  int executeseconds, startmjd, startseconds, numdatastreams, numbaselines, numconfigs, defaultconfigindex, baselinetablelength, telescopetablelength, datastreamtablelength, freqtablelength, databufferfactor, numdatasegments, numcoreconfs, maxnumchannels, maxnumpulsarbins, numindependentchannelconfigs;
+  bool commonread, configread, datastreamread, consistencyok;
+  int visbufferlength;
+  int executeseconds, startmjd, startseconds, startns, numdatastreams, numbaselines, numconfigs, defaultconfigindex, baselinetablelength, telescopetablelength, datastreamtablelength, freqtablelength, databufferfactor, numdatasegments, numcoreconfs, maxnumchannels, maxnumpulsarbins, numindependentchannelconfigs;
   string delayfilename, uvwfilename, coreconffilename, outputfilename;
   int * numprocessthreads;
   int * firstnaturalconfigindices;

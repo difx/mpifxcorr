@@ -9,19 +9,9 @@
  *   but WITHOUT ANY WARRANTY; without even the implied warranty of        *
  *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.                  *
  ***************************************************************************/
-
-//===============================================================================
-// SVN properties (DO NOT CHANGE)
-//
-// $HeadURL$
-// $LastChangedRevision$
-// $Author$
-// $LastChangedDate$
-//
-//===============================================================================
-
 #include "core.h"
 #include "fxmanager.h"
+#include "mpifxcorr.h"
 
 Core::Core(int id, Configuration * conf, int * dids, MPI_Comm rcomm)
   : mpiid(id), config(conf), return_comm(rcomm)
@@ -34,14 +24,12 @@ Core::Core(int id, Configuration * conf, int * dids, MPI_Comm rcomm)
   numdatastreams = config->getNumDataStreams();
   numbaselines = config->getNumBaselines();
   maxresultlength = config->getMaxResultLength();
-  numprocessthreads = config->getCNumProcessThreads(mpiid - numdatastreams - FxManager::FIRSTTELESCOPEID);
+  numprocessthreads = config->getCNumProcessThreads(mpiid - numdatastreams - fxcorr::FIRSTTELESCOPEID);
   currentconfigindex = 0;
   startmjd = config->getStartMJD();
   startseconds = config->getStartSeconds();
 
-  //pulsarscale = vectorAlloc_f32(2*config->getMaxNumChannels() + 2);
-
-  //work out the biggest ovearhead from any of the active configurations
+  //work out the biggest overhead from any of the active configurations
   maxguardratio = 1.0;
   databytes = config->getMaxDataBytes();
   for(int i=0;i<config->getNumConfigs();i++)
@@ -58,7 +46,7 @@ Core::Core(int id, Configuration * conf, int * dids, MPI_Comm rcomm)
   int overheadbytes = 0;
   for(int i=0;i<numdatastreams;i++)
   {
-    if(config->isMkV(i))
+    if(config->isMkV(i) || config->isNativeMkV(i))
       overheadbytes = config->getFrameBytes(0, i);
   }
   databytes += overheadbytes;
@@ -160,7 +148,6 @@ Core::~Core()
     delete [] procslots[i].controlbuffer;
     vectorFree(procslots[i].results);
   }
-  //vectorFree(pulsarscale);
   delete [] processthreads;
   delete [] processconds;
   delete [] processthreadinitialised;
@@ -216,10 +203,8 @@ void Core::execute()
     //increment and receive some more data
     receivedata(numreceived++ % RECEIVE_RING_LENGTH, &terminate);
     
-    //send the results back, after pulsar scaling if necessary
-    //if(config->pulsarBinOn(procslots[numreceived%RECEIVE_RING_LENGTH].configindex) && !procslots[numreceived%RECEIVE_RING_LENGTH].scrunchoutput)
-    //  pulsarScale(numreceived%RECEIVE_RING_LENGTH);
-    MPI_Ssend(procslots[numreceived%RECEIVE_RING_LENGTH].results, procslots[numreceived%RECEIVE_RING_LENGTH].resultlength*2, MPI_FLOAT, FxManager::MANAGERID, procslots[numreceived%RECEIVE_RING_LENGTH].resultsvalid, return_comm);
+    //send the results back
+    MPI_Ssend(procslots[numreceived%RECEIVE_RING_LENGTH].results, procslots[numreceived%RECEIVE_RING_LENGTH].resultlength*2, MPI_FLOAT, fxcorr::MANAGERID, procslots[numreceived%RECEIVE_RING_LENGTH].resultsvalid, return_comm);
 
     //zero the results buffer for this slot and set the status back to valid
     status = vectorZero_cf32(procslots[numreceived%RECEIVE_RING_LENGTH].results, procslots[numreceived%RECEIVE_RING_LENGTH].resultlength);
@@ -229,7 +214,7 @@ void Core::execute()
   }
 
   //Run through the shutdown sequence
-  cout << "Core " << mpiid << " commencing termination sequence" << endl;
+//  cout << "Core " << mpiid << " commencing termination sequence" << endl;
   for(int i=0;i<numprocessthreads;i++)
   {
     //Unlock the mutex we are currently holding for this thread
@@ -241,7 +226,7 @@ void Core::execute()
   //ensure all the results we have sitting around have been sent
   for(int i=1;i<RECEIVE_RING_LENGTH-1;i++)
   {
-    cout << "Core " << mpiid << " about to send final values from section " << i << endl;
+//    cout << "Core " << mpiid << " about to send final values from section " << i << endl;
     for(int j=0;j<numprocessthreads;j++)
     {
       //Lock and unlock first to ensure the threads have finished working on this slot
@@ -253,10 +238,10 @@ void Core::execute()
         cerr << "Error in Core " << mpiid << " attempt to unlock mutex" << (numreceived+i) % RECEIVE_RING_LENGTH << " of thread " << j << endl;
     }
     //send the results
-    MPI_Ssend(procslots[(numreceived+i)%RECEIVE_RING_LENGTH].results, procslots[(numreceived+i)%RECEIVE_RING_LENGTH].resultlength*2, MPI_FLOAT, FxManager::MANAGERID, procslots[numreceived%RECEIVE_RING_LENGTH].resultsvalid, return_comm);
+    MPI_Ssend(procslots[(numreceived+i)%RECEIVE_RING_LENGTH].results, procslots[(numreceived+i)%RECEIVE_RING_LENGTH].resultlength*2, MPI_FLOAT, fxcorr::MANAGERID, procslots[numreceived%RECEIVE_RING_LENGTH].resultsvalid, return_comm);
   }
 
-  cout << "CORE " << mpiid << " is about to join the processthreads" << endl;
+//  cout << "CORE " << mpiid << " is about to join the processthreads" << endl;
 
   //join the process threads, they have to already be finished anyway
   for(int i=0;i<numprocessthreads;i++)
@@ -266,73 +251,29 @@ void Core::execute()
       cerr << "Error in Core " << mpiid << " attempt to join processthread " << i << endl;  
   }
 
-  cout << "CORE " << mpiid << " terminating" << endl;
+//  cout << "CORE " << mpiid << " terminating" << endl;
 }
-
-/*
-void Core::pulsarScale(int index)
-{
-  int status, findex, currentoutputbands, resultindex = 0;
-  //cout << "Core " << mpiid << " about to pulsar scale!" << endl;
-  //do the pulsar scaling
-  for(int i=0;i<numbaselines;i++)
-  {
-    for(int j=0;j<config->getBNumFreqs(procslots[index].configindex, i);j++)
-    {
-      for(int k=0;k<procslots[index].numpulsarbins;k++)
-      {
-        for(int l=0;l<procslots[index].numchannels+1;l++)
-        {
-          pulsarscale[2*l] = (procslots[index].bincounts[k][j][l] > 0)?float(config->getBlocksPerSend(procslots[index].configindex))/float(procslots[index].bincounts[k][j][l]):0.0;
-          pulsarscale[2*l+1] = pulsarscale[2*l];
-        }
-        for(int p=0;p<config->getBNumPolProducts(procslots[index].configindex,i,j);p++)
-        {
-          status = vectorMul_f32_I(pulsarscale, (f32*)&(procslots[index].results[resultindex]), 2*procslots[index].numchannels + 2);
-          if(status != vecNoErr)
-            cerr << "Error trying to pulsar scale baselines!!!" << endl;
-          resultindex += procslots[index].numchannels + 1;
-        }
-      }
-    }
-  }
-  //cout << "Core " << mpiid << " finished pulsar scaling!" << endl;
-
-  //clear the bincounts
-  if(config->pulsarBinOn(procslots[index].configindex))
-  {
-    for(int i=0;i<procslots[index].numpulsarbins;i++)
-    {
-      for(int j=0;j<config->getMaxNumFreqs(procslots[index].configindex);j++)
-      {
-        status = vectorZero_s32(procslots[index].bincounts[i][j], procslots[index].numchannels+1);
-        if(status != vecNoErr)
-          cerr << "Error trying to zero bincounts!!!" << endl;
-      }
-    }
-  }
-  //cout << "Core " << mpiid << " finished clearing bin counts!" << endl;
-}
-*/
 
 void * Core::launchNewProcessThread(void * tdata)
 {
   processthreadinfo * mydata = (processthreadinfo *)tdata;
   (mydata->thiscore)->loopprocess(mydata->processthreadid);
+
+  return 0;
 }
 
 void Core::loopprocess(int threadid)
 {
-  int perr, numprocessed, startblock, numblocks, lastconfigindex, numpolycos, numbins, numchan, maxbins, maxchan, maxpolycos, maxfreqs, status;
+  int perr, numprocessed, startblock, numblocks, lastconfigindex, numpolycos,  numchan, maxbins, maxchan, maxpolycos, maxfreqs;
   bool pulsarbin, somepulsarbin, scrunch = false;
-  Polyco ** polycos;
-  Polyco * currentpolyco;
+  Polyco ** polycos=0;
+  Polyco * currentpolyco=0;
   Mode ** modes;
   s32 ** bins;
   cf32 * threadresults = vectorAlloc_cf32(maxresultlength);
-  cf32 * pulsarscratchspace;
-  cf32 ***** pulsaraccumspace;
-
+  cf32 * pulsarscratchspace=0;
+  cf32 ***** pulsaraccumspace=0;
+  
   pulsarbin = false;
   somepulsarbin = false;
   maxpolycos = 0;
@@ -375,7 +316,7 @@ void Core::loopprocess(int threadid)
     polycos = new Polyco*[maxpolycos];
   updateconfig(lastconfigindex, lastconfigindex, threadid, startblock, numblocks, numpolycos, pulsarbin, modes, polycos, true, &bins);
   numprocessed = 0;
-  cout << "Core thread id " << threadid << " will be processing from block " << startblock << ", length " << numblocks << endl;
+//  cout << "Core thread id " << threadid << " will be processing from block " << startblock << ", length " << numblocks << endl;
 
   //lock the end section
   perr = pthread_mutex_lock(&(procslots[RECEIVE_RING_LENGTH-1].slotlocks[threadid]));
@@ -425,7 +366,7 @@ void Core::loopprocess(int threadid)
   }
 
   //fallen out of loop, so must be finished.  Unlock held mutex
-  cout << "PROCESS " << mpiid << "/" << threadid << " process thread about to free resources and exit" << endl;
+//  cout << "PROCESS " << mpiid << "/" << threadid << " process thread about to free resources and exit" << endl;
   perr = pthread_mutex_unlock(&(procslots[numprocessed % RECEIVE_RING_LENGTH].slotlocks[threadid]));
   if (perr != 0)
     cerr << "PROCESSTHREAD " << mpiid << "/" << threadid << " error trying unlock mutex " << (numprocessed)%RECEIVE_RING_LENGTH << endl;;
@@ -471,15 +412,15 @@ void Core::receivedata(int index, bool * terminate)
     return; //don't try to read, we've already finished
 
   //Get the instructions on the time offset from the FxManager node
-  MPI_Recv(&(procslots[index].offsets), 2, MPI_INT, FxManager::MANAGERID, MPI_ANY_TAG, return_comm, &mpistatus);
+  MPI_Recv(&(procslots[index].offsets), 2, MPI_INT, fxcorr::MANAGERID, MPI_ANY_TAG, return_comm, &mpistatus);
   if(mpistatus.MPI_TAG == CR_TERMINATE)
   {
     *terminate = true;
-    cout << "Core " << mpiid << " has received a terminate signal!!!" << endl;
+//    cout << "Core " << mpiid << " has received a terminate signal!!!" << endl;
     procslots[index].keepprocessing = false;
     return; //note return here!!!
   }
-  //cout << "Core " << mpiid << " is receiving time " << procslots[index].offsets[0] << ", " << procslots[index].offsets[1] << endl;
+
   //work out if the source has changed, and if so, whether we need to change the modes and baselines
   currentconfigindex = config->getConfigIndex(procslots[index].offsets[0]);
   if(procslots[index].configindex != currentconfigindex)
@@ -527,17 +468,14 @@ void Core::receivedata(int index, bool * terminate)
 
 void Core::processdata(int index, int threadid, int startblock, int numblocks, Mode ** modes, Polyco * currentpolyco, cf32 * threadresults, s32 ** bins, cf32* pulsarscratchspace, cf32***** pulsaraccumspace)
 {
-  int status, perr, resultindex, currentnumoutputbands, cindex, maxproducts;
+  int status, perr, resultindex=0, currentnumoutputbands, cindex, maxproducts, ds1index, ds2index, nyquistchannel;
   double offsetmins;
-  float binweight, currentblockspersendfloat;
-  int * numgoodresults = new int[numdatastreams];
+  float * dsweights = new float[numdatastreams];
   Mode * m1, * m2;
   s32 *** polycobincounts;
   cf32 * vis1;
   cf32 * vis2;
   bool writecrossautocorrs;
-  for(int i=0;i<numdatastreams;i++)
-    numgoodresults[i] = 0;
 
   writecrossautocorrs = modes[0]->writeCrossAutoCorrs();
   maxproducts = config->getMaxProducts();
@@ -564,7 +502,7 @@ void Core::processdata(int index, int threadid, int startblock, int numblocks, M
     //do the station-based processing for this FFT chunk
     for(int j=0;j<numdatastreams;j++)
     {
-      numgoodresults[j] += modes[j]->process(i);
+      dsweights[j] = modes[j]->process(i);
     }
 
     //if necessary, work out the pulsar bins
@@ -578,12 +516,21 @@ void Core::processdata(int index, int threadid, int startblock, int numblocks, M
     for(int j=0;j<numbaselines;j++)
     {
       //get the two modes that contribute to this baseline
-      m1 = modes[config->getBOrderedDataStream1Index(procslots[index].configindex, j)];
-      m2 = modes[config->getBOrderedDataStream2Index(procslots[index].configindex, j)];
+      ds1index = config->getBOrderedDataStream1Index(procslots[index].configindex, j);
+      ds2index = config->getBOrderedDataStream2Index(procslots[index].configindex, j);
+      m1 = modes[ds1index];
+      m2 = modes[ds2index];
 
       //add the desired results into the resultsbuffer
       for(int k=0;k<config->getBNumFreqs(procslots[index].configindex, j);k++)
       {
+        //the Nyquist channel referred to here is for the *first* datastream of the baseline, in the event
+        //that one datastream has USB and the other has LSB
+        nyquistchannel = procslots[index].numchannels;
+        if(config->getFreqTableLowerSideband(config->getBFreqIndex(procslots[index].configindex, j, k)))
+          nyquistchannel = 0;
+
+        //loop through each polarisation for this frequency
         for(int p=0;p<config->getBNumPolProducts(procslots[index].configindex,j,k);p++)
         {
           if(procslots[index].pulsarbin)
@@ -605,16 +552,18 @@ void Core::processdata(int index, int threadid, int startblock, int numblocks, M
                 pulsaraccumspace[j][k][p][bins[config->getBFreqIndex(procslots[index].configindex, j, k)][l]][l].re += pulsarscratchspace[l].re;
                 pulsaraccumspace[j][k][p][bins[config->getBFreqIndex(procslots[index].configindex, j, k)][l]][l].im += pulsarscratchspace[l].im;
               }
+              pulsaraccumspace[j][k][p][0][nyquistchannel].im += dsweights[ds1index]*dsweights[ds2index];
             }
             else
             {
               for(int l=0;l<procslots[index].numchannels+1;l++)
               {
-                //cindex = resultindex + p*procslots[index].numpulsarbins*(procslots[index].numchannels+1) + bins[config->getBFreqIndex(procslots[index].configindex, j, k)][l]*(procslots[index].numchannels+1) + l;
                 cindex = resultindex + bins[config->getBFreqIndex(procslots[index].configindex, j, k)][l]*config->getBNumPolProducts(procslots[index].configindex,j,k)*(procslots[index].numchannels+1) + p*(procslots[index].numchannels+1) + l;
                 threadresults[cindex].re += pulsarscratchspace[l].re;
                 threadresults[cindex].im += pulsarscratchspace[l].im;
               }
+              cindex = resultindex + p*(procslots[index].numchannels+1) + nyquistchannel;
+              threadresults[cindex].im += dsweights[ds1index]*dsweights[ds2index];
             }
           }
           else
@@ -623,6 +572,7 @@ void Core::processdata(int index, int threadid, int startblock, int numblocks, M
             status = vectorAddProduct_cf32(m1->getFreqs(config->getBDataStream1BandIndex(procslots[index].configindex, j, k, p)), m2->getConjugatedFreqs(config->getBDataStream2BandIndex(procslots[index].configindex, j, k, p)), &(threadresults[resultindex]), procslots[index].numchannels+1);
             if(status != vecNoErr)
               cerr << "Error trying to xmac baseline " << j << " frequency " << k << " polarisation product " << p << ", status " << status << endl;
+            threadresults[resultindex+nyquistchannel].im += dsweights[ds1index]*dsweights[ds2index];
             resultindex += procslots[index].numchannels+1;
           }
         }
@@ -642,14 +592,22 @@ void Core::processdata(int index, int threadid, int startblock, int numblocks, M
   {
     resultindex = 0;
     f64 * binweights = currentpolyco->getBinWeights();
+
+    //do the scrunch
     for(int i=0;i<numbaselines;i++)
     {
       for(int j=0;j<config->getBNumFreqs(procslots[index].configindex, i);j++)
       {
+        //the Nyquist channel referred to here is for the *first* datastream of the baseline, in the event
+        //that one datastream has USB and the other has LSB
+        nyquistchannel = procslots[index].numchannels;
+        if(config->getFreqTableLowerSideband(config->getBFreqIndex(procslots[index].configindex, i, j)))
+          nyquistchannel = 0;
         if(procslots[index].scrunchoutput)
         {
           for(int k=0;k<config->getBNumPolProducts(procslots[index].configindex,i,j);k++)
           {
+            float baselineweight = pulsaraccumspace[i][j][k][0][nyquistchannel].im;
             for(int l=0;l<procslots[index].numpulsarbins;l++)
             {
               //Scale the accumulation space, and scrunch it into the results vector
@@ -665,6 +623,8 @@ void Core::processdata(int index, int threadid, int startblock, int numblocks, M
               if(status != vecNoErr)
                 cerr << "Error trying to zero pulsaraccumspace!!!" << endl;
             }
+            //store the correct weight
+            threadresults[resultindex + nyquistchannel].im = baselineweight;
             resultindex += procslots[index].numchannels+1;
           }
         }
@@ -678,6 +638,9 @@ void Core::processdata(int index, int threadid, int startblock, int numblocks, M
               status = vectorMulC_f32_I((f32)(binweights[k]), (f32*)(&(threadresults[resultindex])), 2*procslots[index].numchannels+2);
               if(status != vecNoErr)
                 cerr << "Error trying to scale pulsar binned (non-scrunched) results!!!" << endl;
+              if(k==0)
+                //renormalise the weight
+                threadresults[resultindex + nyquistchannel].im /= binweights[k];
               resultindex += procslots[index].numchannels+1;
             }
           }
@@ -696,7 +659,7 @@ void Core::processdata(int index, int threadid, int startblock, int numblocks, M
   if(status != vecNoErr)
     cerr << "Error trying to add thread results to final results!!!" << endl;
 
-  //copy the autocorrelations (and the bincounts if necessary)
+  //copy the autocorrelations
   for(int j=0;j<numdatastreams;j++)
   {
     currentnumoutputbands = modes[j]->getNumOutputBands();
@@ -720,24 +683,9 @@ void Core::processdata(int index, int threadid, int startblock, int numblocks, M
       }
     }
   }
-
-  //add the bin counts if we're pulsar binning but not scrunching
-  //if(config->pulsarBinOn(procslots[index].configindex) && !procslots[index].scrunchoutput)
-  //{
-  //  for(int i=0;i<procslots[index].numpulsarbins;i++)
-  //  {
-  //    for(int j=0;j<config->getMaxNumFreqs(procslots[index].configindex);j++)
-  //    {
-  //      status = vectorAdd_s32_I((currentpolyco->getBinCounts())[i][j], procslots[index].bincounts[i][j], procslots[index].numchannels+1);
-  //      if(status != vecNoErr)
-  //        cerr << "Error trying to copy bin counts!!!" << endl;
-  //    }
-  //  }
-  //}
-
-  //clear the bin count if necessary
-  if(config->pulsarBinOn(procslots[index].configindex))
-    currentpolyco->incrementBinCount();
+  //clear the bin count if necessary - NO LONGER NECESSARY
+  //if(config->pulsarBinOn(procslots[index].configindex))
+  //  currentpolyco->incrementBinCount();
 
   //unlock the copy lock
   perr = pthread_mutex_unlock(&(procslots[index].copylock));
@@ -753,7 +701,7 @@ void Core::processdata(int index, int threadid, int startblock, int numblocks, M
   perr = pthread_mutex_unlock(&(procslots[index].slotlocks[threadid]));
   if(perr != 0)
     cerr << "PROCESSTHREAD " << mpiid << "/" << threadid << " error trying unlock mutex " << index; 
-  delete [] numgoodresults;
+  delete [] dsweights;
 }
 
 void Core::createPulsarAccumSpace(cf32***** pulsaraccumspace, int newconfigindex, int oldconfigindex)

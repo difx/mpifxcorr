@@ -9,20 +9,10 @@
  *   but WITHOUT ANY WARRANTY; without even the implied warranty of        *
  *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.                  *
  ***************************************************************************/
-
-//===============================================================================
-// SVN properties (DO NOT CHANGE)
-//
-// $HeadURL$
-// $LastChangedRevision$
-// $Author$
-// $LastChangedDate$
-//
-//===============================================================================
-
 #include "datastream.h"
 #include "core.h"
 #include "fxmanager.h"
+#include "mpifxcorr.h"
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -30,6 +20,11 @@
 #include <errno.h>
 #include <values.h>
 #include <math.h>
+#include "config.h"
+#ifdef HAVE_DIFXMESSAGE
+#include <difxmessage.h>
+#endif
+
 
 DataStream::DataStream(Configuration * conf, int snum, int id, int ncores, int * cids, int bufferfactor, int numsegments)
   : config(conf), streamnum(snum), mpiid(id), numcores(ncores), databufferfactor(bufferfactor), numdatasegments(numsegments)
@@ -68,12 +63,20 @@ void DataStream::initialise()
   int currentconfigindex, currentoverflowbytes, overflowbytes = 0;
   bufferbytes = databufferfactor*config->getMaxDataBytes(streamnum);
   readbytes = bufferbytes/numdatasegments;
+
+  //cout << "******DataStream " << mpiid << ": Initialise. bufferbytes=" << bufferbytes << "  numdatasegments=" << numdatasegments << "  readbytes=" << readbytes << endl;
+
   for(int i=0;i<config->getNumConfigs();i++) {
     currentoverflowbytes = int((((long long)config->getDataBytes(i,streamnum))*((long long)(config->getBlocksPerSend(i) + config->getGuardBlocks(i))))/config->getBlocksPerSend(i));
     if(currentoverflowbytes > overflowbytes)
       overflowbytes = currentoverflowbytes;
   }
-  databuffer = vectorAlloc_u8(bufferbytes + overflowbytes);
+  cout << "DATASTREAM " << mpiid << " about to allocate " << bufferbytes << " + " << overflowbytes << " bytes in databuffer" << endl;
+  databuffer = vectorAlloc_u8(bufferbytes + overflowbytes + 4); // a couple extra for mark5 case
+  if(databuffer == NULL) {
+    cerr << "Error - datastream " << mpiid << " could not allocate databuffer (length " << bufferbytes + overflowbytes << ")! Aborting correlation" << endl;
+    exit(1);
+  }
   int mindatabytes = config->getDataBytes(0, streamnum);
   for(int i=1;i<config->getNumConfigs();i++)
   {
@@ -99,6 +102,7 @@ void DataStream::initialise()
   while(currentconfigindex < 0)
     currentconfigindex = config->getConfigIndex(++readseconds);
   readfromfile = config->isReadFromFile(currentconfigindex, streamnum);
+
   for(int i=0;i<numdatasegments;i++)
   {
     pthread_mutex_init(&bufferlock[i], NULL);
@@ -149,8 +153,8 @@ void DataStream::execute()
   //read in some data from the first file and launch the reading/network thread
   initialiseMemoryBuffer();
 
-  //get the first instruction on where to send data, and how much of it (three ints in a row - core index, seconds offset, samplesoffset)
-  MPI_Irecv(receiveinfo, 3, MPI_INT, FxManager::MANAGERID, MPI_ANY_TAG, MPI_COMM_WORLD, &msgrequest);
+  //get the first instruction on where to send data, and how much of it (three ints in a row - core index, seconds offset, ns offset)
+  MPI_Irecv(receiveinfo, 3, MPI_INT, fxcorr::MANAGERID, MPI_ANY_TAG, MPI_COMM_WORLD, &msgrequest);
   
   while(status == vecNoErr)
   {
@@ -164,7 +168,7 @@ void DataStream::execute()
     offsetns = receiveinfo[2];
 
     //now get another instruction while we process
-    MPI_Irecv(receiveinfo, 3, MPI_INT, FxManager::MANAGERID, MPI_ANY_TAG, MPI_COMM_WORLD, &msgrequest);
+    MPI_Irecv(receiveinfo, 3, MPI_INT, fxcorr::MANAGERID, MPI_ANY_TAG, MPI_COMM_WORLD, &msgrequest);
 
     if(action == DS_PROCESS) //send the appropriate data to the core specified
     {
@@ -181,7 +185,6 @@ void DataStream::execute()
           cerr << "Error copying in the DataStream data buffer!!!" << endl;
       }
 
-      //cout << "Datastream " << mpiid << " is sending time " << offsetsec << ", " << offsetns << " to core " << targetcore << endl;
       if(bufferinfo[atsegment].controlbuffer[bufferinfo[atsegment].numsent][0] == -1.0)
       {
         //bad or no data, don't waste time sending full length of junk
@@ -196,7 +199,7 @@ void DataStream::execute()
       }
 
       bufferinfo[atsegment].numsent++;
-      if(bufferinfo[atsegment].numsent == maxsendspersegment) //can occur at the start when many come from segment 0
+      if(bufferinfo[atsegment].numsent >= maxsendspersegment) //can occur at the start when many come from segment 0
       {
         //wait til everything has sent so we can reset the requests and go again
         MPI_Waitall(maxsendspersegment, bufferinfo[atsegment].datarequests, datastatuses);
@@ -324,8 +327,7 @@ void DataStream::initialiseFile(int configindex, int fileindex)
 //the returned value MUST be between 0 and bufferlength
 int DataStream::calculateControlParams(int offsetsec, int offsetns)
 {
-  double geometricdelay;
-  int geometricsampledelay, currentgeometricsampledelay, intdelayseconds, firstoffsetns, lastoffsetns, bufferindex, perr, blockbytes;
+  int intdelayseconds, firstoffsetns, lastoffsetns, bufferindex, perr, blockbytes;
 
   //work out the first delay and the last delay and place in control buffer
   intdelayseconds = ((offsetsec + corrstartseconds) - delaystartseconds) + 86400*(corrstartday - delaystartday);
@@ -339,6 +341,10 @@ int DataStream::calculateControlParams(int offsetsec, int offsetns)
     offsetns += 1000000000;
     firstoffsetns += 1000000000;
     lastoffsetns += 1000000000;
+  }
+  if(lastoffsetns < 0)
+  {
+    cerr << "lastoffsetns < 0 still! =" << lastoffsetns << endl;
   }
 
   //while we have passed the first of our two locked sections, unlock that and lock the next - have two tests so sample difference can't overflow
@@ -372,6 +378,14 @@ int DataStream::calculateControlParams(int offsetsec, int offsetns)
       bufferinfo[atsegment].controlbuffer[bufferinfo[atsegment].numsent][i] = -1.0;
     return 0; //note exit here!!!!
   }
+
+  // FIXME -- talk to Adam about this next check.  -WFB
+  if(offsetsec > bufferinfo[atsegment].seconds + 1)
+  {
+    for(int i=0;i<bufferinfo[atsegment].controllength;i++)
+      bufferinfo[atsegment].controlbuffer[bufferinfo[atsegment].numsent][i] = -1.0;
+    return 0; //note exit here!!!!
+  }
   
   //now that we obviously have a lock on all the data we need, fill the control buffer
   blockbytes = (bufferinfo[atsegment].numchannels*2*bufferinfo[atsegment].bytespersamplenum)/bufferinfo[atsegment].bytespersampledenom;
@@ -388,6 +402,7 @@ int DataStream::calculateControlParams(int offsetsec, int offsetns)
 
   //if we make it here, its safe to make the int calculations below
   bufferindex = atsegment*readbytes + (int(((offsetsec - bufferinfo[atsegment].seconds)*1000000000 + (firstoffsetns - bufferinfo[atsegment].nanoseconds))/bufferinfo[atsegment].sampletimens + 0.5)*bufferinfo[atsegment].bytespersamplenum)/bufferinfo[atsegment].bytespersampledenom;
+
   //align the index to nearest previous 16 bit boundary
   if(bufferindex%2 != 0)
     bufferindex -= 1;
@@ -400,7 +415,8 @@ int DataStream::calculateControlParams(int offsetsec, int offsetns)
   }
   if(bufferindex < 0)
   {
-    bufferinfo[atsegment].controlbuffer[bufferinfo[atsegment].numsent][0] = -1;
+    for(int i=0;i<bufferinfo[atsegment].controllength;i++)
+      bufferinfo[atsegment].controlbuffer[bufferinfo[atsegment].numsent][i] = -1.0;
     return 0;
   }
 
@@ -481,7 +497,7 @@ void DataStream::initialiseMemoryBuffer()
 void DataStream::calculateQuadraticParameters(int intdelayseconds, int offsetns)
 {
   int snindex;
-  double offset, delayoffsetseconds;
+  double delayoffsetseconds;
 
   delayoffsetseconds = intdelayseconds + double(offsetns)/1000000000.0;
   snindex = static_cast<int>((delayoffsetseconds*1000)/delayincms);
@@ -534,18 +550,26 @@ void DataStream::updateConfig(int segmentindex)
   bufferinfo[segmentindex].nsinc = int((bufferinfo[segmentindex].sampletimens*(bufferbytes/numdatasegments)*bufferinfo[segmentindex].bytespersampledenom)/(bufferinfo[segmentindex].bytespersamplenum) + 0.5);
   portnumber = config->getDPortNumber(bufferinfo[segmentindex].configindex, streamnum);
   tcpwindowsizebytes = config->getDTCPWindowSizeKB(bufferinfo[segmentindex].configindex, streamnum)*1024;
+  tcp = 1;
+  if (tcpwindowsizebytes<0) {
+    tcp = 0;
+  }
 }
 
 void * DataStream::launchNewFileReadThread(void * thisstream)
 {
   DataStream * me = (DataStream *)thisstream;
   me->loopfileread();
+
+  return 0;
 }
 
 void * DataStream::launchNewNetworkReadThread(void * thisstream)
 {
   DataStream * me = (DataStream *)thisstream;
   me->loopnetworkread();
+
+  return 0;
 }
 
 void DataStream::loopfileread()
@@ -559,9 +583,9 @@ void DataStream::loopfileread()
   if(keepreading) {
     diskToMemory(numread++);
     diskToMemory(numread++);
-  perr = pthread_mutex_lock(&(bufferlock[numread]));
-  if(perr != 0)
-    cerr << "Error in initial telescope readthread lock of first buffer section!!!" << endl;
+    perr = pthread_mutex_lock(&(bufferlock[numread]));
+    if(perr != 0)
+      cerr << "Error in initial telescope readthread lock of first buffer section!!!" << endl;
   }
   readthreadstarted = true;
   perr = pthread_cond_signal(&initcond);
@@ -687,7 +711,7 @@ void DataStream::loopnetworkread()
   if(perr != 0)
     cerr << "Error in telescope readthread unlock of buffer section!!!" << lastvalidsegment << endl;
 
-  cout << "DATASTREAM " << mpiid << "'s networkreadthread is exiting!!! Keepreading was " << keepreading << ", framebyesremaining was " << framebytesremaining << endl;
+  cout << "DATASTREAM " << mpiid << "'s networkreadthread is exiting!!! Keepreading was " << keepreading << ", framebytesremaining was " << framebytesremaining << endl;
 }
 
 void DataStream::openstream(int portnumber, int tcpwindowsizebytes)
@@ -695,7 +719,6 @@ void DataStream::openstream(int portnumber, int tcpwindowsizebytes)
   //okay - this has no counterpart in the disk case.  Just gets the socket open
   int serversock, status;
   socklen_t client_len;
-  struct linger      linger = {1, 1};
   struct sockaddr_in server, client;    /* Socket address */
 
   /* Open a server connection for reading */
@@ -703,64 +726,85 @@ void DataStream::openstream(int portnumber, int tcpwindowsizebytes)
   /* Initialise server's address */
   memset((char *)&server,0,sizeof(server));
   server.sin_family = AF_INET;
-  server.sin_addr.s_addr = htonl(INADDR_ANY); /* Anyone can connect */
+  //server.sin_addr.s_addr = htonl(INADDR_ANY); /* Anyone can connect */
   server.sin_port = htons((unsigned short)portnumber); /* Which port number to use */
 
-  /* Create a server to listen with */
-  serversock = socket(AF_INET,SOCK_STREAM,0); 
-  if (serversock==-1) 
-    cerr << "Error creating socket" << endl;
+  if (tcp) { // TCP socket
+    cout << "Datastream " << mpiid << ": Creating a TCP socket on port " << portnumber << endl;
+    /* Create a server to listen with */
+    serversock = socket(AF_INET,SOCK_STREAM,0); 
+    if (serversock==-1) 
+      cerr << "Error creating socket" << endl;
 
-  /* Set the linger option so that if we need to send a message and
-     close the socket, the message shouldn't get lost */
-  status = setsockopt(serversock, SOL_SOCKET,SO_LINGER, (char *)&linger,
-		      sizeof(struct linger));
-  if (status!=0) {
-    cerr << "Error setting socket options" << endl;
-    close(serversock);
-  } 
-  
-  /* Set the TCP window size */
-  setsockopt(serversock, SOL_SOCKET, SO_SNDBUF,
-	     (char *) &tcpwindowsizebytes, sizeof(tcpwindowsizebytes));
-  if (status!=0) {
-    cerr << "Error setting socket options" << endl;
-    close(serversock);
-  } 
+    /* Set the TCP window size */
 
-  setsockopt(serversock, SOL_SOCKET, SO_RCVBUF,
-	     (char *) &tcpwindowsizebytes, sizeof(tcpwindowsizebytes));
+    if (tcpwindowsizebytes>0) {
+      cout << "Datastream " << mpiid << ": Set TCP window to " << int(tcpwindowsizebytes/1024) << " kB" << endl;
+      status = setsockopt(serversock, SOL_SOCKET, SO_RCVBUF,
+		 (char *) &tcpwindowsizebytes, sizeof(tcpwindowsizebytes));
 
-  if (status!=0) {
-    cerr << "Error setting socket options" << endl;
-    close(serversock);
-  } 
-  
+      if (status!=0) {
+	cerr << "Datastream " << mpiid << ": Error setting socket RCVBUF" << endl;
+	close(serversock);
+      } 
+
+      int window_size;
+      socklen_t winlen = sizeof(window_size);
+      status = getsockopt(serversock, SOL_SOCKET, SO_RCVBUF,
+			  (char *) &window_size, &winlen);
+      if (status!=0) {
+	cerr << "Datastream " << mpiid << ": Error getting socket RCVBUF" << endl;
+      }
+      printf("Sending buffersize set to %d Kbytes\n", window_size/1024);
+
+    }
+  } else { // UDP socket  
+    cout << "Datastream " << mpiid << ": Creating a UDP socket on port " << portnumber << endl;
+    serversock = socket(AF_INET,SOCK_DGRAM, IPPROTO_UDP); 
+    if (serversock==-1) 
+      cerr << "Error creating UDP socket" << endl;
+    // Should exit here on error
+
+    int udpbufbytes = 32*1024*1024;
+    status = setsockopt(serversock, SOL_SOCKET, SO_RCVBUF,
+			(char *) &udpbufbytes, sizeof(udpbufbytes));
+    
+    if (status!=0) {
+      cerr << "Datastream " << mpiid << ": Error setting socket RCVBUF" << endl;
+	close(serversock);
+    } 
+  }
+
   status = bind(serversock, (struct sockaddr *)&server, sizeof(server));
   if (status!=0) {
-    cerr << "Error binding socket" << endl;
+    cerr << "Datastream " << mpiid << ": Error binding socket" << endl;
     close(serversock);
   } 
   
-  /* We are willing to receive conections, using the maximum
-     back log of 1 */
-  status = listen(serversock,1);
-  if (status!=0) {
-    cerr << "Error binding socket" << endl;
-    close(serversock);
+  if (tcp) { // TCP
+
+    /* We are willing to receive conections, using the maximum
+       back log of 1 */
+    status = listen(serversock,1);
+    if (status!=0) {
+      cerr << "Datastream " << mpiid << ": Error binding socket" << endl;
+      close(serversock);
+    }
+
+    cout << "Datastream " << mpiid << ": Waiting for connection" << endl;
+
+    /* Accept connection */
+    client_len = sizeof(client);
+    socketnumber = accept(serversock, (struct sockaddr *)&client, &client_len);
+    if (socketnumber == -1) {
+      cerr << "Datastream " << mpiid << ": Error connecting to client" << endl;
+      close(serversock);
+    }
+    cout << "Datastream " << mpiid << " got a connection from " << inet_ntoa(client.sin_addr) << endl;
+  } else {  // UDP
+    socketnumber = serversock;
+    cout << "Datastream " << mpiid << ": Ready to receive UDP data" << endl;
   }
-
-  cout << "Waiting for connection" << endl;
-
-  /* Accept connection */
-  client_len = sizeof(client);
-  socketnumber = accept(serversock, (struct sockaddr *)&client, &client_len);
-  if (socketnumber == -1) {
-    cerr << "Error connecting to client" << endl;
-    close(serversock);
-  }
-
-  cout << "Datastream " << mpiid << " got a connection from " << inet_ntoa(client.sin_addr) << endl;
 }
 
 void DataStream::closestream()
@@ -784,9 +828,9 @@ int DataStream::openframe()
 
   buf = (char*)malloc(LBA_HEADER_LENGTH); // Minimum size of file header
 
-  cout << "About to open frame" << endl;
+  //cout << "About to open frame" << endl;
   status = readnetwork(socketnumber, buf, ntoread, &nread);
-  cout << "Read first network successfully" << endl;
+  //cout << "Read first network successfully" << endl;
   if (status==-1) { // Error reading socket
     cerr << "Error reading socket" << endl;
     keepreading=false;
@@ -877,7 +921,7 @@ int DataStream::initialiseFrame(char * frameheader)
 
   inputline = at;
 
-  cout << "DataStream " << mpiid << " read a header line of " << inputline << "!" << endl;
+  //cout << "DataStream " << mpiid << " read a header line of " << inputline << "!" << endl;
   year = atoi((inputline.substr(0,4)).c_str());
   month = atoi((inputline.substr(4,2)).c_str());
   day = atoi((inputline.substr(6,2)).c_str());
@@ -900,8 +944,13 @@ void DataStream::networkToMemory(int buffersegment, int & framebytesremaining)
   char *ptr;
   int bytestoread, nread, status;
 
+  
+  //cout << "***DataStream " << mpiid << ": Waiting on buffer " << buffersegment << "/" << numdatasegments << endl;
   //do the buffer housekeeping
   waitForBuffer(buffersegment);
+  //cout << "***DataStream " << mpiid << ": Got it. Reading " << readbytes << endl;
+
+  //cout << "***DataStream " << mpiid << ": framebytesremaining = " << framebytesremaining << endl;
  
   bytestoread = readbytes;
   if (bytestoread>framebytesremaining)
@@ -914,7 +963,7 @@ void DataStream::networkToMemory(int buffersegment, int & framebytesremaining)
   status = readnetwork(socketnumber, ptr, bytestoread, &nread);
 
   if (status==-1) { // Error reading socket
-    cerr << "Error reading socket" << endl;
+    cerr << "Datastream " << mpiid << ": Error reading socket" << endl;
     keepreading=false;
   } else if (status==0) {  // Socket closed remotely
     keepreading=false;
@@ -930,6 +979,7 @@ void DataStream::networkToMemory(int buffersegment, int & framebytesremaining)
   readnanoseconds += bufferinfo[buffersegment].nsinc;
   readseconds += readnanoseconds/1000000000;
   readnanoseconds %= 1000000000;
+
 }
 
 int DataStream::readnetwork(int sock, char* ptr, int bytestoread, int* nread)
@@ -937,6 +987,8 @@ int DataStream::readnetwork(int sock, char* ptr, int bytestoread, int* nread)
   int nr;
 
   *nread = 0;
+
+  //cout << "DataStream " << mpiid << ": Reading " << bytestoread << " bytes" << endl;
 
   while (bytestoread>0)
   {
@@ -972,6 +1024,7 @@ void DataStream::waitForBuffer(int buffersegment)
     perr = pthread_cond_wait(&readcond, &(bufferlock[buffersegment]));
     if (perr != 0)
       cerr << "Error waiting on ok to read condition!!!!" << endl;
+    usleep(20);
   }
 }
 

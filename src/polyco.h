@@ -9,20 +9,10 @@
  *   but WITHOUT ANY WARRANTY; without even the implied warranty of        *
  *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.                  *
  ***************************************************************************/
-
-//===============================================================================
-// SVN properties (DO NOT CHANGE)
-//
-// $HeadURL$
-// $LastChangedRevision$
-// $Author$
-// $LastChangedDate$
-//
-//===============================================================================
-
 #ifndef POLYCO_H
 #define POLYCO_H
 
+#include <mpi.h>
 #include <string>
 #include <iostream>
 #include <fstream>
@@ -126,7 +116,7 @@ public:
   * Returns the weight*width product for the specified bin
   * @return The weight*width product for the specified bin
   */
-  inline f64 getBinWeightTimesWidth(int bin) { return (bin==0)?1.0+binweights[bin]*(binphases[bin]-binphases[(bin+numbins+1)%numbins]):binweights[bin]*(binphases[bin]-binphases[(bin+numbins+1)%numbins]); }
+  inline f64 getBinWeightTimesWidth(int bin) { return binweights[bin]*(binphases[bin]-binphases[(bin+numbins+1)%numbins]); }
 
  /**
   * Clears the bin counts
