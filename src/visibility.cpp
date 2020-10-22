@@ -405,8 +405,8 @@ void Visibility::writedata()
             baselineweights[i][freqindex][b][k] = floatresults[resultindex]/fftsperintegration;
           baselineweightcounts[i][freqindex][b][k]++;
           if(freqindex != targetfreqindex) {
-            baselineweights[i][targetfreqindex][b][k] += baselineweights[i][freqindex][b][k];
-            baselineweightcounts[i][targetfreqindex][b][k]++;
+            baselineweights[i][targetfreqindex][b][k] += baselineweights[i][freqindex][b][k]*config->getFreqTableBandwidth(freqindex)/config->getFreqTableBandwidth(targetfreqindex);
+            baselineweightcounts[i][targetfreqindex][b][k] = 1;
           }
           resultindex++;
         }
@@ -893,7 +893,6 @@ std::cout << "viz::writedata() todisk [OUT fq:" << freqindex << " blineFq:" << b
                 currentweight = baselineweights[i][freqindex][b][k]*baselineshiftdecorrs[i][freqindex][s] / baselineweightcounts[i][freqindex][b][k];
               else
                 currentweight = baselineweights[i][freqindex][b][k] / baselineweightcounts[i][freqindex][b][k];
-// TODO possibly: divide currentweight by size of vector getSortedInputfreqsOfTargetfreq()
               insertDiFXHeader(baselinenumber, dumpmjd, dumpseconds, currentconfigindex, sourceindex, freqindex, polpair, b, 0, currentweight, buvw, filecount);
 
               //close, reopen in binary and write the binary data, then close again
