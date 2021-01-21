@@ -34,6 +34,7 @@
 #include "pcal.h"
 
 //using namespace std;
+const float Mode::TINY = 0.000000001;
 
 #if (ARCH == GENERIC)
 pthread_mutex_t FFTinitMutex = PTHREAD_MUTEX_INITIALIZER;
@@ -176,16 +177,16 @@ Mode::Mode(Configuration * conf, int confindex, int dsindex, int recordedbandcha
       {
         if(j<numrecordedbands)
         {
-	  if(fringerotationorder == 0) // post-F
-	  {
-	    fftoutputs[j][k] = vectorAlloc_cf32(recordedbandchannels+1);
+          if(fringerotationorder == 0) // post-F
+          {
+            fftoutputs[j][k] = vectorAlloc_cf32(recordedbandchannels+1);
             conjfftoutputs[j][k] = vectorAlloc_cf32(recordedbandchannels+1);
-	  }
-	  else
-	  {
+          }
+          else
+          {
             fftoutputs[j][k] = vectorAlloc_cf32(recordedbandchannels);
             conjfftoutputs[j][k] = vectorAlloc_cf32(recordedbandchannels);
-	  }
+          }
           estimatedbytes += 2*sizeof(cf32)*recordedbandchannels;
         }
         else
@@ -197,7 +198,7 @@ Mode::Mode(Configuration * conf, int confindex, int dsindex, int recordedbandcha
           for(int l=0;l<numrecordedbands;l++) {
             if(config->getDLocalRecordedFreqIndex(confindex, dsindex, l) == parentfreqindex && config->getDRecordedBandPol(confindex, dsindex, l) == config->getDZoomBandPol(confindex, dsindex, j-numrecordedbands)) {
               fftoutputs[j][k] = &(fftoutputs[l][k][config->getDZoomFreqChannelOffset(confindex, dsindex, localfreqindex)]);
-	      conjfftoutputs[j][k] = &(conjfftoutputs[l][k][config->getDZoomFreqChannelOffset(confindex, dsindex, localfreqindex)]);
+              conjfftoutputs[j][k] = &(conjfftoutputs[l][k][config->getDZoomFreqChannelOffset(confindex, dsindex, localfreqindex)]);
             }
           }
           if(fftoutputs[j][k] == 0)
@@ -874,7 +875,7 @@ void Mode::process(int index, int subloopindex)  //frac sample error is in micro
     if(recordedfreqlooffsets[i] > 0.0 || recordedfreqlooffsets[i] < 0.0) {
       looff = true;
       fraclooffset = fabs(recordedfreqlooffsets[i]) - int(fabs(recordedfreqlooffsets[i]));
-      if (fraclooffset > TINY)
+      if (fraclooffset > Mode::TINY)
         isfraclooffset = true;
       if (recordedfreqlooffsets[i] < 0)
         fraclooffset = -fraclooffset;
@@ -1214,13 +1215,13 @@ void Mode::process(int index, int subloopindex)  //frac sample error is in micro
                   status = vectorConjFlip_cf32(fftd, fftoutputs[j][subloopindex], recordedbandchannels/2+1);
                   status = vectorConjFlip_cf32(&fftd[recordedbandchannels/2]+1, &fftoutputs[j][subloopindex][recordedbandchannels/2]+1, recordedbandchannels/2-1);
                 } else {
-                  status = vectorConjFlip_cf32(fftd, fftoutputs[j][subloopindex], recordedbandchannels);
+                  //status = vectorConjFlip_cf32(fftd, fftoutputs[j][subloopindex], recordedbandchannels);
                   // note: using vectorConjFlip_cf32() -lofreq breaks Complex LSB (non-DSB!) fringes for VGOS *assuming* VGOS RDBE-G indeed LSB like memos claim
                   // fix?: LSB fringes are restored at least for a synthetic fully correlated data set of Complex USB and Complex LSB data.
                   //       The reversal has to be changed as below to retain DC in bin 0, producing not [ch1 ch2 ch3 ... DC] but instead [DC ch1 ch2 ch3 ...]
                   // todo: validate fix on real world definitely-known-LSB data (evidenced by pcal tone positions etc), then uncomment the next lines:
-                  //status = vectorConjFlip_cf32(fftd+1, fftoutputs[j][subloopindex]+1, recordedbandchannels-1);
-                  //fftoutputs[j][subloopindex][0] = fftd[0];
+                  status = vectorConjFlip_cf32(fftd+1, fftoutputs[j][subloopindex]+1, recordedbandchannels-1);
+                  fftoutputs[j][subloopindex][0] = fftd[0];
                 }
               }
               else {

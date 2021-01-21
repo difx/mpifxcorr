@@ -3,13 +3,11 @@ mark5_files = \
 	mark5utils.cpp \
 	nativemk5.cpp \
 	mark5bmark5.cpp \
-	vdifmark5.cpp \
 	watchdog.cpp
 else
 mark5_files = \
 	nativemk5_stubs.cpp \
-	mark5bmark5_stubs.cpp \
-	vdifmark5_stubs.cpp
+	mark5bmark5_stubs.cpp
 endif
 
 if WITH_MARK6SG
@@ -32,7 +30,7 @@ mpifxcorr_SOURCES = \
 	mathutil.cpp \
 	sysutil.cpp \
 	mode.cpp \
-        model.cpp \
+	model.cpp \
 	mk5.cpp \
 	mk5mode.cpp \
 	datamuxer.cpp \
@@ -60,8 +58,8 @@ library_include_HEADERS = \
 	sysutil.h \
 	mk5.h \
 	mk5mode.h \
-        model.h \
-        mode.h \
+	model.h \
+	mode.h \
 	polyco.h \
 	nativemk5.h \
 	watchdog.h \
@@ -73,6 +71,7 @@ library_include_HEADERS = \
 	vdiffile.h \
 	vdiffake.h \
 	vdifnetwork.h \
+	debug_flags.h \
 	alert.h 
 
 # historically these have been in both $(includedir)/{.,mpifxcorr}

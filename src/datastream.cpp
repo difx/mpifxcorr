@@ -97,8 +97,7 @@ DataStream::DataStream(const Configuration * conf, int snum, int id, int ncores,
 
 DataStream::~DataStream()
 {
-  if(input.is_open())
-    input.close();
+  closefile();
   vectorFree(databuffer);
   for(int i=0;i<numdatasegments;i++)
   {
@@ -768,7 +767,7 @@ void DataStream::updateConfig(int segmentindex)
   do {
     nsaccumulate += bufferinfo[segmentindex].bytespersampledenom*bufferinfo[segmentindex].sampletimens;
     bufferinfo[segmentindex].bytesbetweenintegerns += bufferinfo[segmentindex].bytespersamplenum;
-  } while (!(fabs(nsaccumulate - int(nsaccumulate+0.5)) < TINY));
+  } while (!(fabs(nsaccumulate - int(nsaccumulate+0.5)) < Mode::TINY));
   bufferinfo[segmentindex].nsinc = int((bufferinfo[segmentindex].sampletimens*(bufferbytes/numdatasegments)*bufferinfo[segmentindex].bytespersampledenom)/(bufferinfo[segmentindex].bytespersamplenum) + 0.5);
 
   /* in theory these parameters below can change but in practice that would lead to major complications.  In any case
@@ -864,7 +863,7 @@ void DataStream::loopfileread()
   while(!dataremaining && keepreading) {
     openfile(bufferinfo[0].configindex, filesread[bufferinfo[0].configindex]++);
     if(!dataremaining)
-      input.close();
+      closefile();
   }
   if(keepreading) {
     if(datamuxer) {
@@ -930,7 +929,7 @@ void DataStream::loopfileread()
     }
     if(keepreading)
     {
-      input.close();
+      closefile();
       //if we need to, change the config
       int nextconfigindex = config->getScanConfigIndex(readscan);
       while(nextconfigindex < 0 && readscan < model->getNumScans()) {
@@ -1812,6 +1811,14 @@ void DataStream::openfile(int configindex, int fileindex)
   isnewfile = true;
   //read the header and set the appropriate times etc based on this information
   initialiseFile(configindex, fileindex);
+}
+
+void DataStream::closefile()
+{
+  if(input.is_open())
+  {
+    input.close();
+  }
 }
 
 void DataStream::initialiseFile(int configindex, int fileindex)

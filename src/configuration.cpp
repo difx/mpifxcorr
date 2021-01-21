@@ -1129,7 +1129,7 @@ bool Configuration::processBaselineTable(istream * input)
       //first find the matching USB freq
       for(int i=0;i<freqtablelength;i++)
       {
-        if(!freqtable[i].lowersideband && fabs(freqtable[f].bandwidth - freqtable[i].bandwidth) < TINY && fabs(freqtable[f].bandedgefreq - freqtable[f].bandwidth - freqtable[i].bandedgefreq) < TINY) //match
+        if(!freqtable[i].lowersideband && fabs(freqtable[f].bandwidth - freqtable[i].bandwidth) < Mode::TINY && fabs(freqtable[f].bandedgefreq - freqtable[f].bandwidth - freqtable[i].bandedgefreq) < Mode::TINY) //match
           matchfindex = i;
       }
       for(int i=0;i<baselinetablelength;i++)
@@ -1816,7 +1816,7 @@ bool Configuration::processDatastreamTable(istream * input)
     double ffttime = 1000.0*f.numchannels/f.bandwidth;
     double bpersenddouble = configs[i].subintns/ffttime;
     configs[i].blockspersend = int(bpersenddouble + 0.5);
-    if (fabs(bpersenddouble - configs[i].blockspersend) > TINY) {
+    if (fabs(bpersenddouble - configs[i].blockspersend) > Mode::TINY) {
       ok = false;
       if(mpiid == 0) //only write one copy of this error message
         cfatal << startl << "The supplied value of subint nanoseconds (" << configs[i].subintns << ") for config " << i << " does not yield an integer number of FFTs! (FFT time is " << ffttime << ") - aborting!!!" << endl;
@@ -2319,11 +2319,11 @@ bool Configuration::populateFrequencyDetails()
             freqdiff -= freqtable[j].bandwidth;
           if(freqtable[k].lowersideband)
             freqdiff += freqtable[k].bandwidth;
-#warning "JanW: The next statement is suspect. Is 'diff<TINY' critical here, or was 'fabs(diff)<TINY' intended?"
-          if(bwdiff < TINY && freqdiff < TINY && freqtable[j].numchannels == freqtable[k].numchannels && 
-            freqtable[j].channelstoaverage == freqtable[k].channelstoaverage && 
+#warning "JanW: The next statement is suspect. Is 'diff<TINY' critical here, or was 'fabs(diff)<TINY' intended? Changed to use the latter."
+          if(fabs(bwdiff) < Mode::TINY && fabs(freqdiff) < Mode::TINY && freqtable[j].numchannels == freqtable[k].numchannels &&
+            freqtable[j].channelstoaverage == freqtable[k].channelstoaverage &&
             freqtable[j].oversamplefactor == freqtable[k].oversamplefactor &&
-            freqtable[j].decimationfactor == freqtable[k].decimationfactor) 
+            freqtable[j].decimationfactor == freqtable[k].decimationfactor)
           {
             if(configs[i].frequsedbysomebaseline[k])
               configs[i].equivfrequsedbysomebaseline[j] = true;
@@ -2858,7 +2858,7 @@ bool Configuration::consistencyCheck()
       }
       double zoomfreqchannelwidth = freqtable[datastreamtable[i].zoomfreqtableindices[j]].bandwidth/freqtable[datastreamtable[i].zoomfreqtableindices[j]].numchannels;
       double parentfreqchannelwidth = freqtable[datastreamtable[i].recordedfreqtableindices[datastreamtable[i].zoomfreqparentdfreqindices[j]]].bandwidth/freqtable[datastreamtable[i].recordedfreqtableindices[datastreamtable[i].zoomfreqparentdfreqindices[j]]].numchannels;
-      if(fabs(zoomfreqchannelwidth - parentfreqchannelwidth) > TINY) {
+      if(fabs(zoomfreqchannelwidth - parentfreqchannelwidth) > Mode::TINY) {
         if(mpiid == 0) //only write one copy of this error message
           cfatal << startl << "Datastream table entry " << i << " has a zoom frequency index (freq " << j << ") whose channel width (" << zoomfreqchannelwidth << ") does not match its parents channel width (" << parentfreqchannelwidth << ") - aborting!!!" << endl;
         return false;
@@ -2947,7 +2947,13 @@ bool Configuration::consistencyCheck()
       double nsaccumulate = 0.0;
       do {
         nsaccumulate += dsdata->bytespersampledenom*samplens;
-      } while (!(fabs(nsaccumulate - int(nsaccumulate)) < TINY));
+	if (nsaccumulate> 1e6)
+        {
+          if(mpiid == 0) //only write one copy of this error message
+            cfatal << startl << "Accumulate time between integer number of nanoseconds is too long (check bandwidth values specified) - aborting!!!" << endl;
+          return false;
+        }
+      } while (!(fabs(nsaccumulate - int(nsaccumulate+0.5)) < Mode::TINY));
       cdebug << startl << "NS accumulate is " << nsaccumulate << " and max geom slip is " << model->getMaxRate(dsdata->modelfileindex)*configs[i].subintns*0.000001 << ", maxnsslip is " << dsdata->maxnsslip << endl;
       nsaccumulate += model->getMaxRate(dsdata->modelfileindex)*configs[i].subintns*0.000001;
       if(nsaccumulate > dsdata->maxnsslip)
@@ -3011,7 +3017,7 @@ bool Configuration::consistencyCheck()
           cfatal << startl << "FFT chunk time for config " << i << ", datastream " << j << " is not a whole number of nanoseconds (" << ffttime << ") - aborting!!!" << endl;
         return false;
       }
-      if(fabs(numffts - int(numffts+0.5)) > TINY) {
+      if(fabs(numffts - int(numffts+0.5)) > Mode::TINY) {
         if(mpiid == 0) //only write one copy of this error message
           cfatal << startl << "Send of size " << configs[i].subintns << " does not yield an integer number of FFTs for datastream " << j << " in config " << i << " - aborting!!!" << endl;
         return false;
@@ -3024,7 +3030,7 @@ bool Configuration::consistencyCheck()
       }
       for (int k=1;k<getDNumRecordedFreqs(i,j);k++) {
         freqdata f = freqtable[datastreamtable[configs[i].datastreamindices[j]].recordedfreqtableindices[k]];
-        if (fabs((1000.0*f.numchannels)/f.bandwidth) - ffttime > TINY) {
+        if (fabs((1000.0*f.numchannels)/f.bandwidth) - ffttime > Mode::TINY) {
           if(mpiid == 0) //only write one copy of this error message
             cfatal << startl << "Frequency " << k << " of datastream " << j << " of config " << i << " has a different bandwidth or num channels to the other freqs of this datastream - aborting!!!" << endl;
           return false;
