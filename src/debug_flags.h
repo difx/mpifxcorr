@@ -1,0 +1,8 @@
+#ifndef DEBUG_FLAGS
+#define DEBUG_FLAGS
+
+#define DBG_TARGET_FQ_NR 121
+#define DBG_TARGET_BLINE_START 0
+#define DBG_TARGET_BLINE_STOP  1
+
+#endif

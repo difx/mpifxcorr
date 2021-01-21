@@ -43,7 +43,7 @@
 #include <difxmessage.h>
 #include "alert.h"
 
-#include "D_janw.h"
+//#include "debug_flags.h"
 
 Visibility::Visibility(Configuration * conf, int id, int numvis, char * dbuffer, int dbufferlen, int eseconds, int scan, int scanstartsec, int startns, const string * pnames)
   : config(conf), visID(id), currentscan(scan), currentstartseconds(scanstartsec), currentstartns(startns), numvisibilities(numvis), executeseconds(eseconds), todiskbufferlength(dbufferlen), polnames(pnames), todiskbuffer(dbuffer)
@@ -488,8 +488,10 @@ void Visibility::writedata()
       if(config->getFNumChannels(freqindex) % config->getFChannelsToAverage(freqindex) != 0) {
         freqchannels++;
 // TODO:  fractional sized post-avg channel(s) within spectrum, probably two inputbands contribute to a channel in the wider spectrum, scale somehow by both of them
+#ifdef DEBUG_FLAGS
 if (targetfreqindex==DBG_TARGET_FQ_NR && i>=DBG_TARGET_BLINE_START && i<=DBG_TARGET_BLINE_STOP)
 std::cout << "viz::writedata() fq:" << targetfreqindex << " memberFq:" << freqindex << " fqchans=" << (freqchannels-1) << " last ch pads " << paddingchannels << "/" << config->getFChannelsToAverage(freqindex) << " bins" <<endl;
+#endif
       }
       for(int s=0;s<model->getNumPhaseCentres(currentscan);s++)
       {
@@ -554,7 +556,6 @@ std::cout << "viz::writedata() fq:" << targetfreqindex << " memberFq:" << freqin
                 if (config->getDGainOffset(currentconfigindex, ds2, localfreqindex) != 0.0)
                 {
                   double gainadj = 1.0 + config->getDGainOffset(currentconfigindex, ds2, localfreqindex);
-std::cout << "ds2 getDGainOffset() final gain=" << gainadj << std::endl;
                   scale *= gainadj;
                 }
                 if(config->getDataFormat(currentconfigindex, ds1) == Configuration::LBASTD || config->getDataFormat(currentconfigindex, ds1) == Configuration::LBAVSOP)
@@ -579,11 +580,12 @@ std::cout << "ds2 getDGainOffset() final gain=" << gainadj << std::endl;
 
             // follow core.cpp indexing here; resultindex = coreindex + coreoffset
             coreoffset = (b*config->getBNumPolProducts(currentconfigindex, i, j) + k)*targetfreqchannels;
+#ifdef DEBUG_FLAGS
 if (targetfreqindex==DBG_TARGET_FQ_NR && i>=DBG_TARGET_BLINE_START && i<=DBG_TARGET_BLINE_STOP)
 {
 std::cout << "viz::writedata() scale [OUT fq:" << targetfreqindex << " memberFq:" << freqindex << "][bl:" << i << "] phase="<<s<<" bin=" <<b << " pol="<<k<<" : dataindex=" << coreindex << " + " << coreoffset << " = " << coreindex+coreoffset << " scale=" << scale << " for " << freqchannels << "ch" << std::endl;
 }
-
+#endif
             //amplitude calibrate the data
             if(scale > 0.0)
             {
@@ -885,6 +887,7 @@ resultindex = config->getCoreResultBaselineOffset(currentconfigindex, freqindex,
             // follow core.cpp indexing
             coreoffset = (b*numpolproducts + k)*freqchannels;
 
+#ifdef DEBUG_FLAGS
 if (freqindex==DBG_TARGET_FQ_NR && i>=DBG_TARGET_BLINE_START && i<=DBG_TARGET_BLINE_STOP)
 {
 std::cout << "viz::writedata() todisk [OUT fq:" << freqindex << " blineFq:" << baselinefreqindex << "][bl:" << i << "] phase=" << s <<" bin=" << b << " pol=" << k
@@ -892,7 +895,7 @@ std::cout << "viz::writedata() todisk [OUT fq:" << freqindex << " blineFq:" << b
     << " vs resultindex=" << resultindex << ", "
     << freqchannels << "ch" << std::endl;
 }
-
+#endif
             //open the file for appending in ascii and write the ascii header
             if(baselineweights[i][freqindex][b][k] > 0.0)
             {

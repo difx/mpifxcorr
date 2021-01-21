@@ -30,7 +30,7 @@
 #include "alert.h"
 #include "config.h"
 
-//#include "D_janw.h" // DBG_TARGET_*
+//#include "debug_flags.h"
 
 Core::Core(int id, Configuration * conf, int * dids, MPI_Comm rcomm)
   : mpiid(id), config(conf), return_comm(rcomm)
