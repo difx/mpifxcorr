@@ -533,7 +533,10 @@ std::cout << "viz::writedata() fq:" << targetfreqindex << " memberFq:" << freqin
                 //Adjust by gain offsets.
                 //TODO: Ideally, parent autocorrs (not manual gain offsets!) should take out any power differences across a combined band, avoiding power "steps" at joined band boundaries?
                 if(ds1bandindex >= config->getDNumRecordedBands(currentconfigindex, ds1))
-                  localfreqindex = config->getDZoomFreqParentFreqIndex(currentconfigindex, ds1, ds1bandindex-config->getDNumRecordedBands(currentconfigindex, ds1));
+                {
+                  int localzoomfreqindex = config->getDLocalZoomFreqIndex(currentconfigindex, ds1, ds1bandindex-config->getDNumRecordedBands(currentconfigindex, ds1));
+                  localfreqindex = config->getDZoomFreqParentFreqIndex(currentconfigindex, ds1, localzoomfreqindex);
+                }
                 else
                   localfreqindex = config->getDRecordedFreqIndex(currentconfigindex, ds1, ds1bandindex);
                 if (config->getDGainOffset(currentconfigindex, ds1, localfreqindex) != 0.0)
@@ -542,12 +545,16 @@ std::cout << "viz::writedata() fq:" << targetfreqindex << " memberFq:" << freqin
                   scale *= gainadj;
                 }
                 if(ds2bandindex >= config->getDNumRecordedBands(currentconfigindex, ds2))
-                  localfreqindex = config->getDZoomFreqParentFreqIndex(currentconfigindex, ds2, ds2bandindex-config->getDNumRecordedBands(currentconfigindex, ds2));
+                {
+                  int localzoomfreqindex = config->getDLocalZoomFreqIndex(currentconfigindex, ds2, ds2bandindex-config->getDNumRecordedBands(currentconfigindex, ds2));
+                  localfreqindex = config->getDZoomFreqParentFreqIndex(currentconfigindex, ds2, localzoomfreqindex);
+                }
                 else
                   localfreqindex = config->getDRecordedFreqIndex(currentconfigindex, ds2, ds2bandindex);
                 if (config->getDGainOffset(currentconfigindex, ds2, localfreqindex) != 0.0)
                 {
                   double gainadj = 1.0 + config->getDGainOffset(currentconfigindex, ds2, localfreqindex);
+std::cout << "ds2 getDGainOffset() final gain=" << gainadj << std::endl;
                   scale *= gainadj;
                 }
                 if(config->getDataFormat(currentconfigindex, ds1) == Configuration::LBASTD || config->getDataFormat(currentconfigindex, ds1) == Configuration::LBAVSOP)
@@ -810,7 +817,7 @@ void Visibility::writedifx(int dumpmjd, double dumpseconds)
   bool modelok;
   bool nonzero;
   double buvw[3]; //the u,v and w for this baseline at this time
-  char polpair[3] = {'\0'}; //the polarisation eg RR, LL
+  char polpair[3] = {'\0','\0','\0'}; //the polarisation eg RR, LL
   const char noToneAvailable[] = " -1 0 0 0";
 
   if(currentscan >= model->getNumScans()) {
@@ -842,6 +849,7 @@ void Visibility::writedifx(int dumpmjd, double dumpseconds)
       if(!config->isFrequencyOutput(currentconfigindex, i, freqindex))
         continue;
       // freq is a target output band, look up one representative contributing baseband present on this baseline
+      baselinefreqindex = -1;
       vector<int> constituents = config->getSortedInputfreqsOfTargetfreq(currentconfigindex, i, freqindex);
       for(vector<int>::const_iterator localfq=constituents.begin(); localfq!=constituents.end(); localfq++) {
         baselinefreqindex = config->getBFreqIndexRev(currentconfigindex, i, *localfq);
