@@ -390,6 +390,21 @@ void Visibility::writedata()
     binloop = 1;
 
   for(int i=0;i<numbaselines;i++) {
+    // reset all baseline weights before averaging weights of any outputband freqs
+    for(int j=0;j<config->getBNumFreqs(currentconfigindex,i);j++) {
+      freqindex = config->getBFreqIndex(currentconfigindex, i, j);
+      targetfreqindex = config->getBTargetFreqIndex(currentconfigindex, i, j);
+      for(int b=0;b<binloop;b++) {
+        const int numpolproducts = config->getBNumPolProducts(currentconfigindex, i, j);
+        vectorZero_f32(baselineweights[i][freqindex][b], numpolproducts);
+        vectorZero_f32(baselineweights[i][targetfreqindex][b], numpolproducts);
+        memset(baselineweightcounts[i][freqindex][b], 0x00, numpolproducts*sizeof(int));
+        memset(baselineweightcounts[i][targetfreqindex][b], 0x00, numpolproducts*sizeof(int));
+      }
+    }
+  }
+
+  for(int i=0;i<numbaselines;i++) {
     //grab the baseline weights
     for(int j=0;j<config->getBNumFreqs(currentconfigindex,i);j++) {
       freqindex = config->getBFreqIndex(currentconfigindex, i, j);
@@ -404,9 +419,9 @@ void Visibility::writedata()
           else
             baselineweights[i][freqindex][b][k] = floatresults[resultindex]/fftsperintegration;
           baselineweightcounts[i][freqindex][b][k]++;
-          if(freqindex != targetfreqindex) {
+          if(targetfreqindex != freqindex) {
             baselineweights[i][targetfreqindex][b][k] += baselineweights[i][freqindex][b][k]*config->getFreqTableBandwidth(freqindex)/config->getFreqTableBandwidth(targetfreqindex);
-            baselineweightcounts[i][targetfreqindex][b][k] = 1;
+            baselineweightcounts[i][targetfreqindex][b][k]++;
           }
           resultindex++;
         }
@@ -487,7 +502,7 @@ void Visibility::writedata()
       paddingchannels = config->getFChannelsToAverage(freqindex) - config->getFNumChannels(freqindex) % config->getFChannelsToAverage(freqindex);
       if(config->getFNumChannels(freqindex) % config->getFChannelsToAverage(freqindex) != 0) {
         freqchannels++;
-// TODO:  fractional sized post-avg channel(s) within spectrum, probably two inputbands contribute to a channel in the wider spectrum, scale somehow by both of them
+// TODO: fractional sized post-avg channel(s) within spectrum, probably two inputbands contribute to a channel in the wider spectrum, scale somehow by both of them; OR: use .channelflags file in postprocessing to flag!
 #ifdef DEBUG_FLAGS
 if (targetfreqindex==DBG_TARGET_FQ_NR && i>=DBG_TARGET_BLINE_START && i<=DBG_TARGET_BLINE_STOP)
 std::cout << "viz::writedata() fq:" << targetfreqindex << " memberFq:" << freqindex << " fqchans=" << (freqchannels-1) << " last ch pads " << paddingchannels << "/" << config->getFChannelsToAverage(freqindex) << " bins" <<endl;
@@ -861,7 +876,7 @@ void Visibility::writedifx(int dumpmjd, double dumpseconds)
       assert(baselinefreqindex >= 0);
       // source data location and size
       coreindex = config->getCoreResultBaselineOffset(currentconfigindex, freqindex, i);
-resultindex = config->getCoreResultBaselineOffset(currentconfigindex, freqindex, i); // to print out comparison 'coreindex+coreoffset' vs 'resultindex, resultindex+=freqchannels'
+      resultindex = config->getCoreResultBaselineOffset(currentconfigindex, freqindex, i); // to print out comparison 'coreindex+coreoffset' vs 'resultindex, resultindex+=freqchannels'
       freqchannels = config->getFNumChannels(freqindex)/config->getFChannelsToAverage(freqindex);
       if(config->getFNumChannels(freqindex) % config->getFChannelsToAverage(freqindex) != 0) {
        cout << "visbility.cpp " << __LINE__ << " ERROR: outputband nch " << config->getFNumChannels(freqindex) << " not divisible by " << config->getFChannelsToAverage(freqindex) << endl;
@@ -893,7 +908,9 @@ if (freqindex==DBG_TARGET_FQ_NR && i>=DBG_TARGET_BLINE_START && i<=DBG_TARGET_BL
 std::cout << "viz::writedata() todisk [OUT fq:" << freqindex << " blineFq:" << baselinefreqindex << "][bl:" << i << "] phase=" << s <<" bin=" << b << " pol=" << k
     << " : dataindex=" << coreindex << " + " << coreoffset << " = " << coreindex+coreoffset
     << " vs resultindex=" << resultindex << ", "
-    << freqchannels << "ch" << std::endl;
+    << freqchannels << "ch"
+    << "baselineweights[]=" << baselineweights[i][freqindex][b][k] << " baselineweightcounts[]=" << baselineweightcounts[i][freqindex][b][k]
+    << std::endl;
 }
 #endif
             //open the file for appending in ascii and write the ascii header
@@ -901,9 +918,9 @@ std::cout << "viz::writedata() todisk [OUT fq:" << freqindex << " blineFq:" << b
             {
               //cout << "About to write out baseline[" << i << "][" << s << "][" << k << "] from coreindex " << coreindex+coreoffset << ", whose 6th vis is " << results[coreindex+correoffset+6].re << " + " << results[coreindex+coreoffset+6].im << " i" << endl;
               if(model->getNumPhaseCentres(currentscan) > 1)
-                currentweight = baselineweights[i][freqindex][b][k]*baselineshiftdecorrs[i][freqindex][s] / baselineweightcounts[i][freqindex][b][k];
+                currentweight = baselineweights[i][freqindex][b][k]*baselineshiftdecorrs[i][freqindex][s];
               else
-                currentweight = baselineweights[i][freqindex][b][k] / baselineweightcounts[i][freqindex][b][k];
+                currentweight = baselineweights[i][freqindex][b][k];
               insertDiFXHeader(baselinenumber, dumpmjd, dumpseconds, currentconfigindex, sourceindex, freqindex, polpair, b, 0, currentweight, buvw, filecount);
 
               //close, reopen in binary and write the binary data, then close again
